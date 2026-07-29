@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>dev.sentinel</groupId>
+        <artifactId>sentinel-engine</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>worker-sdk</artifactId>
+    <packaging>jar</packaging>
+
+    <!--
+        Deliberately no dependencies yet.
+        T2.4 requires this module to stay a plain Java library with zero
+        org.springframework.* dependency. Do not add one here later either -
+        if the SDK needs DI or config binding, solve it without Spring.
+    -->
+</project>

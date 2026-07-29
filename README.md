@@ -24,3 +24,10 @@ This is a deliberate learning project built entirely by hand to master productio
 Every feature passes three gates, each tracked as a GitHub issue and closed in order: high-level design, low-level design, then implementation.
 Designs are documented with trade-offs and rejected alternatives before code is written.
 Concurrency claims are proven by stress tests, never asserted in comments.
+
+## Local Setup
+
+1. Start Postgres: `docker compose -f infra/docker-compose.yml up -d`
+2. Build everything: `./mvnw verify`
+3. Run the engine: `./mvnw -pl engine spring-boot:run`
+4. Confirm it's up: `curl localhost:8080/actuator/health`

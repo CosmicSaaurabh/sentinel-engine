@@ -12,10 +12,10 @@ Legend: `[HLD]` design discussion, `[LLD]` detailed design, `[FEAT]` implementat
 
 ### T0.1 [FEAT] Project scaffolding
 
-Set up the repo skeleton: Gradle multi-module build (`engine`, `worker-sdk`, `proto`), Spring Boot 3.x on Java 21, Docker Compose with PostgreSQL 16, Flyway wired in, Testcontainers smoke test, and a GitHub Actions CI running build plus tests.
+Set up the repo skeleton: Maven multi-module build (`engine`, `worker-sdk`, `proto`), Spring Boot 4.x on Java 21, Docker Compose with PostgreSQL 18, Flyway wired in, Testcontainers smoke test, and a GitHub Actions CI running build plus tests.
 
 DoD:
-- `./gradlew build` passes locally and in CI from a clean clone.
+- `./mvnw verify` passes locally and in CI from a clean clone.
 - `docker compose up` brings up Postgres; the app connects and runs an empty Flyway migration.
 - One Testcontainers integration test proves the app context boots against real Postgres.
 - README documents the one-command local setup.
