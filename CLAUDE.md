@@ -45,7 +45,7 @@ Out of scope (MVP):
 
 ## Tech Stack and Engineering Standards
 
-- Java 21, Spring Boot 3.x, Gradle.
+- Java 21, Spring Boot 4.x, Maven.
 - PostgreSQL via Flyway migrations. Prefer explicit SQL over ORM magic where concurrency matters.
 - gRPC with protobuf contracts under `proto/`.
 - Testcontainers for integration tests. Concurrency claims must be proven by tests, not asserted in comments.

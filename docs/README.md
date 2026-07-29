@@ -9,6 +9,7 @@ This folder is the single source of truth for every product and architecture dec
 - `low-level-design/`: class-level designs (`LLD-<nnn>-<slug>.md`) with class diagrams, schema DDL, and concurrency strategy.
 - `adr/`: short architecture decision records (`ADR-<nnn>-<slug>.md`) capturing one decision each, including options rejected.
 - `tasks/`: the phased MVP task breakdown with definitions of done and edge cases.
+- `tasks/tech-debt-register.md`: PR review findings and deferred decisions, each with a priority and a concrete effect, tracked until resolved.
 - `learning-log.md`: running record of new concepts learned, kept for revision.
 
 ## Process
