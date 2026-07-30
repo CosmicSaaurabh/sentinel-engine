@@ -44,17 +44,45 @@ Edge cases to watch:
 
 ### T1.2 [LLD] LLD-001: Schema and Postgres-backed task queue
 
-Detailed design of the relational schema (`workflows`, `tasks`, `task_dependencies`, transition history), state machine transitions as guarded SQL, and the claim query built on `FOR UPDATE SKIP LOCKED`, including the exact indexing strategy that keeps claims fast under high concurrency.
+Detailed design of the relational schema (`workflows`, `tasks`, `task_dependencies`), state machine transitions as guarded SQL, and the claim query built on `FOR UPDATE SKIP LOCKED`, including the exact indexing strategy that keeps claims fast under high concurrency.
+Expanded per HLD-001's scope pivot to also cover: the Citus distribution key (`workflow_id`), the `outbox` table for the transactional-outbox pattern, and the sharded admission-control counter table.
 
 DoD:
 - `docs/low-level-design/LLD-001-schema-and-queue.md` with full DDL, index rationale, the claim query, and its expected `EXPLAIN` shape.
 - Documented analysis: why `SKIP LOCKED` beats advisory locks and beats optimistic version bumping for this queue, with rejected alternatives recorded.
-- Decision recorded on transition history table (audit) vs status column only.
+- Citus distribution key and shard strategy documented, including a check for any operation that would need to cross shards.
+- Outbox table DDL and retention/pruning strategy; sharded admission-counter DDL, shard count, and hashing scheme.
+- History lives in Cassandra via the outbox (HLD-001's CQRS split); this is settled, no longer an open "transition history table vs status column" choice.
 
 Edge cases to watch:
 - A partial index on `status = 'PENDING'` rots if status values evolve; document index maintenance implications.
 - Hot single index page under high claim concurrency (btree contention); consider claim batching.
 - `VACUUM` pressure from high-churn status updates; HOT updates require the status column to avoid indexed-column rewrites where possible.
+- Whether `SELECT ... FOR UPDATE SKIP LOCKED` behaves cleanly fanned out across Citus shards - unverified, needs a spike before this LLD is complete.
+
+### T1.6 [FEAT] Transactional outbox relay and Cassandra history store
+
+Implement the CQRS split: a leaderless relay pool draining the `outbox` table via `SKIP LOCKED` and writing history events to Cassandra, idempotently, keyed on `event_id`.
+
+DoD:
+- Outbox and Cassandra DDL in place; retention job prunes relayed rows.
+- Relay is leaderless, idempotent on retry, and survives being killed mid-drain with no lost or duplicated history events.
+
+Edge cases to watch:
+- Ordering is resolved by Cassandra's clustering key (`sequence_number`), not by relay order.
+- Cassandra unavailable: outbox rows accumulate safely rather than blocking the Postgres side.
+
+### T1.7 [FEAT] Sharded admission-control counters and backpressure
+
+Implement the sharded counter of available task-execution slots and the atomic admission check that rejects new submissions outright (503 + jittered `Retry-After`) when at capacity.
+
+DoD:
+- Claim/completion decrement/increment a randomly-selected shard; read is a single `SELECT SUM(...)` statement.
+- Admission check and workflow persistence happen atomically, in one transaction, not as a separate read-then-decide.
+
+Edge cases to watch:
+- Counter drift needs a periodic reconciliation check against real task counts.
+- Jitter on `Retry-After` so rejected clients don't retry in lockstep.
 
 ### T1.3 [FEAT] Workflow and task persistence layer
 
@@ -167,9 +195,10 @@ Edge cases to watch:
 Design the lease and reaper architecture: heartbeat intervals, lease durations, who reaps (single engine vs multiple), and how re-queue avoids duplicate side effects.
 
 DoD:
-- `docs/high-level-design/HLD-003-failure-recovery.md` with the lease state diagram, reaper election choice (e.g. Postgres advisory lock), and recovery time budget matching NFR4.
+- `docs/high-level-design/HLD-003-failure-recovery.md` with the lease state diagram and recovery time budget matching NFR4.
+- The reaper is leaderless (per HLD-001): any instance safely re-queues via an atomic conditional `UPDATE`, the same way task claiming works - not an elected/single-reaper design.
 - The "at-least-once execution, exactly-once transition" contract written down explicitly, including what the engine can and cannot guarantee about side effects.
-- Two failure modes documented (e.g. reaper split-brain, mass lease expiry after engine pause).
+- Two failure modes documented: mass lease expiry after engine pause, and a zombie worker's late write rejected by fencing (not "reaper split-brain" - the reaper can't split-brain by design).
 
 Edge cases to watch:
 - GC pause or laptop sleep makes a healthy worker look dead; the fencing mechanism from T2.3 must make its late writes harmless.
