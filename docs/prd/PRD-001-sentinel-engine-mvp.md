@@ -46,6 +46,7 @@ Representative workflow: order processing with tasks `reserve-inventory -> charg
 - FR5: A `FAILED` task fails the workflow branch deterministically.
 - FR6: Tasks held by a worker that stops heartbeating are re-queued within a bounded time.
 - FR7: Workflow and task status are queryable at any time.
+- FR8 (added 2026-07-31, per HLD-001 addendum): a workflow submission may specify a future trigger time. Its dependency-free tasks become claimable no earlier than that time, not immediately at submission.
 
 ## 6. Non-Functional Requirements
 
@@ -60,6 +61,7 @@ Representative workflow: order processing with tasks `reserve-inventory -> charg
 - NFR4 (recovery target): stranded tasks re-queued within 3 missed heartbeat intervals.
 - NFR5 (durability): an acknowledged workflow submission survives crash of any single component.
 - NFR6 (observability): every task execution carries a trace spanning submit, schedule, claim, execute, and complete.
+- NFR7 (scheduling accuracy, added 2026-07-31, per HLD-001 addendum): a scheduled workflow's first task becomes claimable within a few seconds of its target trigger time at p99, not guaranteed to sub-second precision. Exact bound not yet confirmed.
 
 ## 7. Success Criteria
 

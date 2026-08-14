@@ -25,6 +25,7 @@ This HLD documents the architecture as converged through extended design discuss
 - FR5: A `FAILED` task fails the workflow branch deterministically.
 - FR6: Tasks held by a worker that stops heartbeating are re-queued within a bounded time.
 - FR7: Workflow and task status are queryable at any time.
+- FR8 (added 2026-07-31): a workflow submission may specify a future trigger time. Its dependency-free tasks become claimable no earlier than that time, not immediately at submission.
 
 ### 2.2 Non-Functional Requirements
 
@@ -36,6 +37,7 @@ This HLD documents the architecture as converged through extended design discuss
 - NFR4 (recovery): stranded tasks re-queued within 3 missed heartbeat intervals.
 - NFR5 (durability): an acknowledged workflow submission survives crash of any single component.
 - NFR6 (observability): every task execution carries a trace spanning submit, schedule, claim, execute, and complete.
+- NFR7 (scheduling accuracy, added 2026-07-31, proposed default pending confirmation): a scheduled workflow's first task becomes claimable within a few seconds of its target trigger time at p99, not guaranteed to sub-second precision. Exact bound not yet confirmed by the engineer.
 
 ## 3. CAP Position
 
@@ -77,15 +79,20 @@ flowchart TB
     Relay["Outbox Relay\n(SKIP LOCKED drain,\nleaderless)"]
     Cassandra[("Cassandra\nhistory / event log\n(append-only)")]
 
+    RedisHint[("Redis\nDispatch Hint Index\n(Sorted Set: workflow_id\nscored by ready time)")]
+
     Kafka["Kafka\n(FUTURE - CDC feed,\nnot in the hot path)"]
     Dashboard["Analytical Dashboard\n(FUTURE)"]
 
-    Client -->|"gRPC: submit DAG"| Ingest
+    Client -->|"gRPC: submit DAG\n(optionally scheduled)"| Ingest
     Ingest -->|"atomic admission check"| Counters
     Ingest -->|"persist workflow + tasks"| Tasks
     Scheduler -->|"atomic dependency-flip\nUPDATE...WHERE...RETURNING"| Tasks
+    Ingest -.->|"best-effort direct write,\nafter commit"| RedisHint
+    Scheduler -.->|"best-effort direct write,\nafter commit"| RedisHint
     Worker -->|"gRPC: poll/claim\n(streaming, long-poll)"| ClaimBroker
-    ClaimBroker -->|"SELECT...FOR UPDATE\nSKIP LOCKED"| Tasks
+    ClaimBroker -->|"pick due workflow_id"| RedisHint
+    ClaimBroker -->|"SELECT...FOR UPDATE\nSKIP LOCKED (router query,\nfiltered on workflow_id)"| Tasks
     Worker -->|"heartbeat / lease renewal"| Heartbeats
     Reaper -->|"reap expired leases,\nbatched + jittered"| Tasks
     Reaper -->|"reads liveness"| Heartbeats
@@ -94,6 +101,7 @@ flowchart TB
     Worker -->|"write history event\n(same txn as state write)"| Outbox
     Relay -->|"SKIP LOCKED drain"| Outbox
     Relay -->|"idempotent write\n(event_id key)"| Cassandra
+    Relay -->|"reconciliation write\n(backstop for missed\ndirect writes)"| RedisHint
     Cassandra -.->|"future"| Kafka
     Kafka -.->|"future"| Dashboard
 ```
@@ -109,8 +117,8 @@ Runs as **N leaderless, active-active instances** with no single point of coordi
 Internally split into four responsibilities, all of which can run on any instance concurrently, none of which requires exclusive ownership except where noted:
 
 - **Ingestion**: receives workflow submissions over gRPC, runs the atomic admission-control check against the sharded counters (Section 4.3), and persists the workflow and its task rows in Postgres. Rejects outright (`503` + `Retry-After`) when at capacity; never accepts and queues without a bound.
-- **Scheduler**: evaluates dependency-flip conditions ("all of this task's parents are `COMPLETED`, mark it `PENDING`") as an atomic conditional `UPDATE`. Decomposable per-task, so any instance (or even the worker that just completed the parent task) can safely run this with no coordination. One exception: a single, thin advisory-lock-elected leader owns one narrow coordination duty at 100M-DAGs/day scale (see Section 4.2.1) — everything else in this bullet remains leaderless.
-- **Claim Broker**: the gRPC-facing role a worker's poll call actually reaches. Runs `SELECT ... FOR UPDATE SKIP LOCKED` on the worker's behalf and returns a claimed task, or nothing. This is the entire dispatch mechanism — the Postgres tasks table is the queue, there is no broker in this path.
+- **Scheduler**: evaluates dependency-flip conditions ("all of this task's parents are `COMPLETED`, mark it `PENDING`") as an atomic conditional `UPDATE`. Decomposable per-task, so any instance (or even the worker that just completed the parent task) can safely run this with no coordination. One exception: a single, thin advisory-lock-elected leader owns one narrow coordination duty at 100M-DAGs/day scale (see Section 4.2.1) - everything else in this bullet remains leaderless.
+- **Claim Broker**: the gRPC-facing role a worker's poll call actually reaches. Runs `SELECT ... FOR UPDATE SKIP LOCKED` on the worker's behalf and returns a claimed task, or nothing. This is the entire dispatch mechanism - the Postgres tasks table is the queue, there is no broker in this path.
 - **Reaper**: periodically finds tasks whose lease has expired (`status = 'RUNNING' AND lease_expires_at < now()`) and atomically re-queues them. Batches and jitters this work rather than requeuing an entire stranded backlog in one burst (see Section 7.2).
 
 #### 4.2.1 Why a thin leader exists at all
@@ -125,7 +133,7 @@ advisory locks must be held on a dedicated, unpooled connection (pooling can sil
 ### 4.3 Postgres (Citus-sharded by `workflow_id`)
 
 The single source of truth for current, claimable state: workflows, tasks, task dependencies, the outbox, the sharded admission-control counters, and worker heartbeat/capacity data.
-Sharded via **Citus** (an open-source Postgres extension providing transparent sharding and a distributed query planner), distributed by `workflow_id` so a single workflow's tasks stay co-located and the dependency-flip check never needs to cross shards.
+Sharded via **Citus** (an open-source Postgres extension providing transparent sharding and a distributed query planner), distributed by `workflow_id` (confirmed 2026-07-31) so a single workflow's tasks stay co-located and the dependency-flip check never needs to cross shards. This depends on a foundational rule: a task dependency edge can never cross a workflow boundary, every workflow is a fully self-contained DAG - matching Temporal and Cadence, where cross-workflow coordination is always an explicit, structured feature (Child Workflows, Signals), never an implicit dependency spanning two independent workflow executions (see the discussion log for sourcing).
 Sharding is confirmed **required**, not optional: benchmarked single-primary Postgres throughput under realistic conditions is ~1,000-1,875 sustained TPS, a 20-200x gap against the NFR2 target depending on average vs. peak.
 
 The admission-control signal is a **sharded counter** (16-32 shard rows, tunable), not a single row and not a live `COUNT` query.
@@ -140,18 +148,30 @@ Sentinel Engine guarantees **at-least-once** task execution, explicitly not at-m
 
 ### 4.5 Outbox Relay
 
-A leaderless pool of relay workers draining the outbox table via the same `SKIP LOCKED` primitive used for task claiming — recognizing "many workers draining a shared table of pending items" as the same structural problem, reusing the same fix.
+A leaderless pool of relay workers draining the outbox table via the same `SKIP LOCKED` primitive used for task claiming - recognizing "many workers draining a shared table of pending items" as the same structural problem, reusing the same fix.
 Ships events to Cassandra using `event_id` (or `(workflow_id, sequence_number)`) as an idempotency/clustering key, so a retried relay overwrites rather than duplicates, and so reads come back in correct logical order regardless of what order relay actually shipped them in.
 This closes the dual-write consistency gap between Postgres (state) and Cassandra (history): the outbox write is atomic with the state write, the relay is async and can be retried safely.
 
 ### 4.6 Cassandra (history / event log)
 
-Append-only workflow/task execution history, partitioned by `workflow_id`, clustered by a per-workflow monotonic `sequence_number` — a Temporal-style replay and audit trail, matching the real precedent this design was benchmarked against.
+Append-only workflow/task execution history, partitioned by `workflow_id`, clustered by a per-workflow monotonic `sequence_number` - a Temporal-style replay and audit trail, matching the real precedent this design was benchmarked against.
 Chosen via a CQRS-shaped split specifically so history's ever-growing, contention-free write pattern never competes with Postgres's bounded, contention-managed active-task working set.
+
+### 4.7a Dispatch Hint Index - Redis (added 2026-07-31)
+
+A Redis **Sorted Set** of `workflow_id`s, each ranked by a score representing the earliest time that workflow should be checked for claimable work: `now()` for an immediately-runnable workflow (FR1-FR7 path), a future timestamp for a scheduled one (FR8). One structure and one range query (`ZRANGEBYSCORE ... 0 now`) serves both cases.
+
+Purpose: converts the Claim Broker's hot-path query from an expensive Citus multi-shard fan-out ("any pending task, anywhere," no filter to route by) into a cheap, single-shard router query ("pending tasks for this one `workflow_id`") - see Section 6 for the trade-off against caching claimed tasks directly, which was considered and rejected.
+
+**Explicitly the primary lookup path, not a source of truth.** Postgres remains the sole authority on task and workflow state (Section 3). A stale or missing entry in this index can only cause a delay (a workflow's work goes unnoticed for a while) or a wasted-but-cheap router query (checked, nothing pending) - never an incorrect claim, since the claim itself is still gated by Postgres's guarded `FOR UPDATE SKIP LOCKED` update.
+
+**Population**: a fast, best-effort write to Redis is attempted immediately *after* the relevant Postgres transaction commits (never before or concurrently - this ordering alone is what prevents Redis from ever pointing at a workflow Postgres doesn't know about, no compensating/undo logic needed). The outbox relay (Section 4.5) is extended with a second consumer that also writes into Redis, reusing its existing `SKIP LOCKED` drain and `relayed_at` bookkeeping as the guaranteed-eventual backstop for any missed direct write.
+
+**Availability**: Redis runs replicated, not as a single instance. A circuit breaker on the engine's calls to Redis (Section 8.3) falls back to a router-shaped round-robin-over-shards claim path if Redis is unreachable - slower, still correct, keeps NFR1's CP guarantee intact since a Redis outage degrades latency, not correctness.
 
 ### 4.7 Kafka and Analytical Dashboard (future, not in the hot path)
 
-Kafka is deliberately **not** used for task dispatch (Section 6 explains why) and is scoped only for a future analytical dashboard fed from Cassandra's history data — a genuine fan-out/multi-consumer justification (a dashboard, and potentially other future consumers), unlike task dispatch which is a single-worker-gets-one-task relationship with no fan-out need.
+Kafka is deliberately **not** used for task dispatch (Section 6 explains why) and is scoped only for a future analytical dashboard fed from Cassandra's history data - a genuine fan-out/multi-consumer justification (a dashboard, and potentially other future consumers), unlike task dispatch which is a single-worker-gets-one-task relationship with no fan-out need.
 
 ## 5. Key Sequence Flows
 
@@ -224,14 +244,17 @@ sequenceDiagram
 - **Sharded admission counter vs. single counter row vs. live `COUNT` query**: chosen sharded counter. A single row is a hot-row bottleneck at the claim/complete write rate; a live count gets slower exactly when most needed (backlog large); a sharded counter's read cost stays constant regardless of backlog size.
 - **Reject-outright vs. accept-and-queue for backpressure**: chosen reject-outright (`503` + `Retry-After`). Nothing is ever acknowledged, so there is no durability promise to honor or ambiguous accepted-but-stalled state to manage.
 - **Citus vs. hand-rolled multi-primary sharding**: chosen Citus. It already solves shard routing and rebalancing, which a manual approach would have to reinvent for a project intended to be maintained long-term.
+- **Redis dispatch-hint index (workflow_id only) vs. caching claimed tasks directly vs. plain round-robin over shards (added 2026-07-31)**: chosen the hint index. The deciding test: when the cache is wrong, does it produce a wrong answer or just a slow one? Caching claimed tasks directly fails that test (stale/lost entries risk a duplicate claim). Caching just "this workflow might have work" passes it (worst case is a delay or a wasted cheap router query, never an incorrect claim), because the actual claim still goes through Postgres's guarded update regardless of what the hint said. Plain round-robin over shards was the fallback considered instead of a cache entirely; kept as the degrade-to path when Redis is unavailable, not the primary path, since it cannot filter by `workflow_id` and so stays exposed to the shard-fan-out cost the hint index exists to avoid.
 
 ## 7. Rejected Alternatives
 
 - **Kafka as the primary task queue.** Rejected as the production claim mechanism: doesn't by itself satisfy FR3 under consumer-group rebalances, and still needs the same atomic Postgres gate to prevent duplicate production. Retained only as a documented comparison exercise, and later, a genuinely justified role feeding the analytical dashboard.
-- **ZooKeeper for worker-liveness "global config."** Rejected: push-based failure detection creates a split-brain risk — a worker can appear dead to ZooKeeper while still alive and mid-side-effect. Superseded by the pull-based lease/fencing model (engine reaper polls a heartbeat timestamp in Postgres).
+- **ZooKeeper for worker-liveness "global config."** Rejected: push-based failure detection creates a split-brain risk - a worker can appear dead to ZooKeeper while still alive and mid-side-effect. Superseded by the pull-based lease/fencing model (engine reaper polls a heartbeat timestamp in Postgres).
 - **Check-then-act idempotency table lookup.** Rejected: a read-then-write check across two workers is a TOCTOU race. The underlying idea (track claim state in Postgres) survives, implemented as one atomic conditional statement instead.
 - **Application-layer WAL shipping / leader-follower for the engine.** Rejected: this re-describes Postgres's own streaming replication, misapplied to the application layer. Superseded by advisory-lock election for the one coordination duty that genuinely needs it.
 - **CDC-to-Cassandra as an admission-control read source.** Rejected: CDC replication is deliberately asynchronous and eventually consistent, which is correct for history but is the opposite of what a real-time, correctness-critical admission decision needs. Atomicity comes from querying the authoritative store (Postgres) directly within one transaction, not from routing through any particular downstream store.
+- **Caching actual claimed task rows in Redis (added 2026-07-31).** Rejected: a stale or crash-lost cache entry could cause a duplicate claim (two workers believing they hold the same task) - the exact bug `SKIP LOCKED` exists to prevent - and creates a second, informal source of truth for claim state, conflicting with the CP position in Section 3. Superseded by the workflow_id-only dispatch hint index (Section 4.7a), which caches a routing hint instead of claim state, so staleness there can only cause delay, never an incorrect claim.
+- **A saga (compensating-transaction) pattern for keeping Redis in sync with Postgres (added 2026-07-31).** Considered and rejected as unnecessary: a saga is for undoing an already-applied step when a later step fails. Nothing here needs undoing - Redis holds no authoritative data, so a failed Redis write leaves Postgres perfectly valid on its own; it only needs a retry (the outbox-relay reconciliation), not a compensating action. Simple write-ordering (Redis only ever written after the Postgres commit succeeds) plus reconciliation is sufficient. Genuine saga practice remains earmarked for the deferred MongoDB DAG-storage exercise below, where a failed second write actually would need to undo the first.
 
 ## 8. Failure Modes
 
@@ -244,7 +267,7 @@ sequenceDiagram
 
 Two distinct sub-cases, deliberately not treated as one problem.
 
-**Dependency fan-out** (many tasks becoming claimable simultaneously): no new mitigation needed — this is exactly what `SKIP LOCKED` is designed for, many claimers concurrently taking different rows with no blocking.
+**Dependency fan-out** (many tasks becoming claimable simultaneously): no new mitigation needed - this is exactly what `SKIP LOCKED` is designed for, many claimers concurrently taking different rows with no blocking.
 
 **Mass reconnection** (engine restart, worker fleet reconnecting en masse, reaper finding a large stranded batch): a genuine risk, mitigated with jitter on every relevant timer (reconnect backoff, heartbeat intervals, `Retry-After` values), batched/staggered reaper recovery instead of one giant requeue burst, and a bulkhead/rate-limit on the engine's poll/claim surface.
 
@@ -255,10 +278,15 @@ Two distinct sub-cases, deliberately not treated as one problem.
 
 ### 8.4 Split-brain (why it largely can't happen here)
 
-Every leaderless operation uses an atomic conditional Postgres statement rather than exclusive ownership, so there is no scenario where two instances both believe they own the same claim, schedule decision, or admission decision — Postgres's row-level locking is the arbiter, not application-level coordination.
+Every leaderless operation uses an atomic conditional Postgres statement rather than exclusive ownership, so there is no scenario where two instances both believe they own the same claim, schedule decision, or admission decision - Postgres's row-level locking is the arbiter, not application-level coordination.
 The one place a "leader" exists at all (Section 4.2.1) is protected by the boundary rule in Section 3: its blast radius is confined to a single fenced Postgres write, so a partitioned or stalled leader is inert, not dangerous.
 
-### 8.5 Not yet formally designed
+### 8.5 Redis dispatch-hint index unavailable (added 2026-07-31)
+
+**Detection**: circuit breaker on the engine's calls to Redis, per the same pattern already used for Postgres and downstream calls (Section 8.3) - fail fast after N consecutive failures/timeouts rather than waiting out each one individually, since that latency would otherwise eat directly into NFR3's 500ms dispatch budget.
+**Mitigation**: Redis runs replicated, not as a single instance, as the first line of defense. On the circuit breaker tripping, the Claim Broker falls back to a router-shaped round-robin-over-shards claim path - slower (more queries per poll in the worst case) but still correct, since it never depends on Redis for correctness, only for speed. NFR1's CP guarantee stays intact: a Redis outage degrades latency, not correctness, matching the same boundary rule that governs every other component in this design.
+
+### 8.6 Not yet formally designed
 
 **Clock skew**: heartbeat and lease timing assumes reasonably synchronized clocks across engine and worker processes; not yet analyzed for what happens under significant skew. Deferred, see Section 9.
 
@@ -272,9 +300,11 @@ Tracked here so they are visible, not lost, and not mistaken for having been dec
 - **Task cancellation**: a genuine push from engine to a running worker, not solved by the pull-claim model. Not in the original FR list; needed before cancellation is a supported feature.
 - **Ingestion-service vs. scheduler-service split**: not structurally required (neither role needs to be a leader), but a deliberate service-decomposition exercise worth doing later for its own learning value.
 - **Sharded advisory-lock leadership**: today's design starts with one thin global leader; revisit sharding the leadership role itself only if benchmarking later proves one leader insufficient at full 100M-DAGs/day scale.
-- **Verification spike required before LLD-001**: confirm `SELECT ... FOR UPDATE SKIP LOCKED` behavior when fanned out across Citus shards — an explicit, currently unverified knowledge gap.
-- **Analytical dashboard and Kafka CDC feed**: build the dashboard sourced from Cassandra's history log via Kafka, as scoped in Section 4.7 — an explicit learning-scope item, not required for the core engine to function.
+- **Verification spike, narrowed (2026-07-31), backlogged not blocking (2026-07-31)**: the dispatch hint index (Section 4.7a) makes the hot-path claim query router-shaped (filtered on `workflow_id`) in the common case, so the original "does `SKIP LOCKED` work as a full multi-shard distributed query" question mostly stops being load-bearing for the hot path. A smaller question remains open: confirm `FOR UPDATE SKIP LOCKED` behaves correctly on a Citus *router* query. The round-robin-over-shards fallback (Section 8.5) still has no `workflow_id` filter to route by, so it still depends on the original, harder multi-shard question unless it is redesigned to also stay router-shaped (for example, round-robin by picking a known `workflow_id` per shard rather than querying "all pending tasks on shard N" unfiltered). Engineer has explicitly deferred this - not a hard blocker for starting LLD-001, revisit if it becomes load-bearing during LLD-001 or implementation.
+- **Exact scheduling-accuracy tolerance (added 2026-07-31)**: NFR7 proposes "a few seconds at p99" as a default; not yet confirmed by the engineer as an exact number.
+- **Max `workflow_id` tries per claim poll (added 2026-07-31)**: when a chosen workflow has fewer pending tasks than a worker's requested batch size, the Claim Broker tops up from additional `workflow_id`s in the hint index; needs an explicit upper bound so one poll cannot spin through an unbounded chain of near-empty workflows, consistent with the project's "no unbounded work per request" rule. Not yet numbered.
+- **Analytical dashboard and Kafka CDC feed**: build the dashboard sourced from Cassandra's history log via Kafka, as scoped in Section 4.7 - an explicit learning-scope item, not required for the core engine to function.
 - **Heartbeat-vs-lease-renewal-frequency tuning**: NFR4's recovery bound constrains how far lease-renewal write frequency can be reduced below raw heartbeat frequency; needs a real tuning pass once benchmarking data exists.
 - **Exact tuning parameters**: admission-counter shard count, hashing scheme, and safety-margin threshold; outbox retention window; dead-letter classification rules. All explicitly LLD-level detail, not decided at this layer.
-- **Clock skew failure mode**: not yet analyzed (Section 8.5).
+- **Clock skew failure mode**: not yet analyzed (Section 8.6).
 - **Cross-project split**: a dedicated HLD/scoping session for `splitwise-app`'s deep Postgres-concurrency learning track, including whether it adopts this project's own three-gate process and its own `CLAUDE.md`.
