@@ -6,8 +6,14 @@ spring:
     username: sentinel
     password: sentinel
     hikari:
-      maximum-pool-size: 5
+      # Sized against the claim path, which holds one connection for the length of one short
+      # transaction. The rule that ties this number to the rest of the system: the request executor
+      # must never be able to demand more connections than the pool can supply, or the pool becomes
+      # an invisible second queue where latency accumulates with nothing pointing at the cause.
+      maximum-pool-size: 20
       minimum-idle: 5
+      # A claim that cannot get a connection must fail fast and let the worker back off, rather
+      # than queue inside Hikari. A blocked claimer looks healthy while doing nothing.
       connection-timeout: 2000
       validation-timeout: 1000
       max-lifetime: 1800000
@@ -16,6 +22,16 @@ spring:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: false
+
+sentinel:
+  claim:
+    # Lease is three heartbeat intervals, which is what NFR4's recovery bound is expressed in.
+    # A worker may miss two heartbeats to a network blip without losing work it is still doing.
+    lease-duration: 30s
+    # A worker cannot usefully hold more leases than it has threads, so the engine caps the
+    # request rather than trusting a worker to ask for a sensible number.
+    max-batch-size: 32
+    record-claim-events: true
 
 management:
   endpoints:

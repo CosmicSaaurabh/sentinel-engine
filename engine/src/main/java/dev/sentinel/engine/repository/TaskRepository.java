@@ -46,6 +46,16 @@ public class TaskRepository {
             "t.id, t.workflow_id, t.name, t.task_type, t.input, t.attempt, t.max_attempts, "
                     + "t.fencing_token, t.lease_expires_at";
 
+    /**
+     * How many rows one multi-row {@code INSERT} carries.
+     *
+     * <p>Postgres allows at most 65535 bind parameters in a single statement, and each task here
+     * binds seven. A large DAG submitted as one statement would hit that ceiling as a confusing
+     * driver error rather than as a clear limit, so insertion chunks instead. Chunking also caps
+     * how much SQL text has to be parsed for one submission.
+     */
+    private static final int INSERT_CHUNK_SIZE = 500;
+
     private final JdbcClient jdbcClient;
 
     public TaskRepository(JdbcClient jdbcClient) {
@@ -71,6 +81,15 @@ public class TaskRepository {
             throw new IllegalArgumentException("a workflow must contain at least one task");
         }
 
+        Map<String, UUID> idsByName = new LinkedHashMap<>();
+        for (int start = 0; start < tasks.size(); start += INSERT_CHUNK_SIZE) {
+            List<NewTask> chunk = tasks.subList(start, Math.min(start + INSERT_CHUNK_SIZE, tasks.size()));
+            idsByName.putAll(insertChunk(workflowId, chunk));
+        }
+        return idsByName;
+    }
+
+    private Map<String, UUID> insertChunk(UUID workflowId, List<NewTask> tasks) {
         StringBuilder sql = new StringBuilder("""
                 INSERT INTO tasks (workflow_id, name, task_type, status, input,
                                    max_attempts, pending_dependencies, next_attempt_at)
@@ -109,9 +128,9 @@ public class TaskRepository {
 
         GuardedUpdate.requireExactly(tasks.size(), inserted.size(), "insertTasks", workflowId);
 
-        Map<String, UUID> idsByName = new LinkedHashMap<>();
-        inserted.forEach(entry -> idsByName.put(entry.getKey(), entry.getValue()));
-        return idsByName;
+        Map<String, UUID> chunkIds = new LinkedHashMap<>();
+        inserted.forEach(entry -> chunkIds.put(entry.getKey(), entry.getValue()));
+        return chunkIds;
     }
 
     // ------------------------------------------------------------------

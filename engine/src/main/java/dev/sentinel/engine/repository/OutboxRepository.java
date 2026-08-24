@@ -48,6 +48,34 @@ public class OutboxRepository {
     }
 
     /**
+     * Appends several events in one statement.
+     *
+     * <p>Used by the claim path, where a poll can take a whole batch of tasks. One insert per
+     * claimed task would make the outbox write scale with batch size inside a transaction that is
+     * meant to stay short.
+     */
+    public int appendAll(UUID workflowId, List<UUID> taskIds, OutboxEventType eventType, String payload) {
+        if (taskIds.isEmpty()) {
+            return 0;
+        }
+        StringBuilder sql = new StringBuilder(
+                "INSERT INTO outbox (workflow_id, task_id, event_type, payload) VALUES\n");
+        java.util.Map<String, Object> params = new java.util.HashMap<>();
+        params.put("workflowId", workflowId);
+        params.put("eventType", eventType.name());
+        params.put("payload", payload == null ? "{}" : payload);
+
+        for (int i = 0; i < taskIds.size(); i++) {
+            if (i > 0) {
+                sql.append(",\n");
+            }
+            sql.append("(:workflowId, :task").append(i).append(", :eventType, CAST(:payload AS jsonb))");
+            params.put("task" + i, taskIds.get(i));
+        }
+        return jdbcClient.sql(sql.toString()).params(params).update();
+    }
+
+    /**
      * Claims a batch of undelivered events for relay.
      *
      * <p>Deliberately the same {@code SKIP LOCKED} shape as the task claim. Many relay workers

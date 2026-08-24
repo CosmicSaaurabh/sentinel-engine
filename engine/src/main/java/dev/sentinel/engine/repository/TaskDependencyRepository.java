@@ -23,6 +23,9 @@ import org.springframework.stereotype.Repository;
 @Repository
 public class TaskDependencyRepository {
 
+    /** Bounded for the same bind-parameter reason as task insertion; each edge binds two. */
+    private static final int INSERT_CHUNK_SIZE = 1_000;
+
     private final JdbcClient jdbcClient;
 
     public TaskDependencyRepository(JdbcClient jdbcClient) {
@@ -34,7 +37,14 @@ public class TaskDependencyRepository {
         if (edges.isEmpty()) {
             return 0;
         }
+        int inserted = 0;
+        for (int start = 0; start < edges.size(); start += INSERT_CHUNK_SIZE) {
+            inserted += insertChunk(workflowId, edges.subList(start, Math.min(start + INSERT_CHUNK_SIZE, edges.size())));
+        }
+        return inserted;
+    }
 
+    private int insertChunk(UUID workflowId, List<TaskEdge> edges) {
         StringBuilder sql = new StringBuilder(
                 "INSERT INTO task_dependencies (workflow_id, task_id, depends_on_task_id) VALUES\n");
         Map<String, Object> params = new HashMap<>();

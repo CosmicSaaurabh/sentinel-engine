@@ -75,6 +75,25 @@ public class WorkflowRepository {
     }
 
     /**
+     * Records first-start for several workflows in one statement.
+     *
+     * <p>A claim batch can span workflows, and this runs inside the claim transaction, so it has to
+     * cost one statement per poll rather than one per claimed task.
+     */
+    public int markStartedIfUnset(java.util.List<UUID> workflowIds) {
+        if (workflowIds.isEmpty()) {
+            return 0;
+        }
+        return jdbcClient.sql("""
+                UPDATE workflows
+                   SET started_at = now(), updated_at = now()
+                 WHERE id IN (:ids) AND started_at IS NULL
+                """)
+                .param("ids", workflowIds)
+                .update();
+    }
+
+    /**
      * Settles the workflow as completed, but only if no task is still in flight.
      *
      * <p>The {@code NOT EXISTS} check is inside the same statement as the update on purpose. Two
