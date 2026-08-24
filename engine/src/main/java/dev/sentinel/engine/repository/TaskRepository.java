@@ -405,19 +405,47 @@ public class TaskRepository {
      * <p>Only non-started tasks are cancellable. A task already {@code RUNNING} is left alone: its
      * worker is mid-execution and may already have caused an external side effect, so the engine
      * lets it finish and report rather than pretending it never happened.
+     *
+     * @return the ids actually cancelled, which is what history should record. Returning the input
+     *         list instead would claim running tasks were cancelled when they were not
      */
-    public int cancelAll(List<UUID> taskIds) {
+    public List<UUID> cancelAll(List<UUID> taskIds) {
         if (taskIds.isEmpty()) {
-            return 0;
+            return List.of();
         }
         return jdbcClient.sql("""
                 UPDATE tasks
                    SET status = 'CANCELLED', updated_at = now()
                  WHERE id IN (:ids)
                    AND status IN ('BLOCKED', 'PENDING')
+                RETURNING id
                 """)
                 .param("ids", taskIds)
-                .update();
+                .query((rs, rowNum) -> rs.getObject("id", UUID.class))
+                .list();
+    }
+
+    /**
+     * Cancels every task in a workflow that has not started.
+     *
+     * <p>Used when a workflow reaches terminal failure. Tasks already {@code RUNNING} are left
+     * alone for the same reason they survive branch cancellation: their worker may already have
+     * caused an external side effect, and pretending otherwise would make the recorded history
+     * disagree with the world.
+     *
+     * @return ids of the tasks that were cancelled
+     */
+    public List<UUID> cancelNotStarted(UUID workflowId) {
+        return jdbcClient.sql("""
+                UPDATE tasks
+                   SET status = 'CANCELLED', updated_at = now()
+                 WHERE workflow_id = :workflowId
+                   AND status IN ('BLOCKED', 'PENDING')
+                RETURNING id
+                """)
+                .param("workflowId", workflowId)
+                .query((rs, rowNum) -> rs.getObject("id", UUID.class))
+                .list();
     }
 
     // ------------------------------------------------------------------

@@ -24,6 +24,27 @@ spring:
     baseline-on-migrate: false
 
 sentinel:
+  dag:
+    # Submission writes a whole DAG inside one transaction, so the DAG has to be bounded or the
+    # transaction is not. A rejected oversized submission is a clear error; an accepted one is a
+    # latency spike nobody can attribute.
+    max-tasks: 1000
+    max-edges: 10000
+    default-max-attempts: 10
+  admission:
+    enabled: true
+    # Tasks in flight across the fleet before new workflows are refused outright. Refusing is the
+    # only answer that gives the caller the information it needs to slow down; accepting turns a
+    # visible rejection into an invisible backlog.
+    total-slots: 10000
+    # Jittered before it is sent, so a rejected fleet does not return in one synchronised wave.
+    retry-after: 5s
+  retry:
+    # Exponential with full jitter: 2s, 4s, 8s ... capped. Jitter is not decoration. Failures are
+    # correlated, so a deterministic schedule makes a thousand tasks retry on the same instant and
+    # knock the recovering downstream service back down.
+    base-delay: 2s
+    max-delay: 5m
   claim:
     # Lease is three heartbeat intervals, which is what NFR4's recovery bound is expressed in.
     # A worker may miss two heartbeats to a network blip without losing work it is still doing.
