@@ -1,6 +1,6 @@
 # LLD-001: Database Schema and Postgres-Backed Task Queue
 
-- Status: proposed
+- Status: accepted, amended during implementation of T1.3
 - Date: 2026-08-24
 - Governs: GitHub issue #3, and the implementation tasks T1.3, T1.4, T1.5, T1.7, T3.3, T3.4
 - Implements: HLD-001 (system architecture), PRD-001
@@ -199,12 +199,12 @@ CREATE INDEX workers_heartbeat_idx ON workers (last_heartbeat_at);
 -- over pending tasks gets slower exactly when the backlog is largest, which is
 -- precisely when admission control must stay fast. Hence N shard rows summed
 -- in one statement.
+-- in_flight is deliberately allowed to go negative on an individual shard.
+-- See section 11 for why a per-row non-negativity constraint would be wrong.
 CREATE TABLE capacity_counters (
     shard_id        int         PRIMARY KEY,
     in_flight       bigint      NOT NULL DEFAULT 0,
-    updated_at      timestamptz NOT NULL DEFAULT now(),
-
-    CONSTRAINT capacity_counters_nonneg CHECK (in_flight >= 0)
+    updated_at      timestamptz NOT NULL DEFAULT now()
 );
 
 INSERT INTO capacity_counters (shard_id)
@@ -482,6 +482,13 @@ Nothing is ever accepted and silently queued beyond capacity, so NFR5's durabili
 
 The counter is a heuristic, not an invariant.
 If it drifts (a crashed engine between claim and counter update), the consequence is admitting slightly too much or too little work, never an incorrect task state. A periodic reconciliation against the real `RUNNING` count corrects drift, and is scheduled work, not hot-path work.
+
+**An individual shard is allowed to go negative, and the clamp lives on the read.**
+This was corrected during T1.3, where the first version carried a per-row `CHECK (in_flight >= 0)`.
+That constraint quietly contradicts the design.
+If a completion may decrement any shard rather than the one its claim incremented, then a shard decremented more often than it has been incremented is a normal, correct state, and only the sum is meaningful.
+Clamping each shard at zero silently discards decrements and so inflates the total, which is the opposite of what a clamp is meant to protect against.
+The shard rows are therefore unconstrained, and the aggregate read is `GREATEST(0, sum(in_flight))`, which absorbs drift at the one place where a negative answer would be meaningless.
 
 ## 12. Citus compatibility
 

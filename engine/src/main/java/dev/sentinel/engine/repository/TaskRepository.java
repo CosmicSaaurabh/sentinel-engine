@@ -1,0 +1,482 @@
+package dev.sentinel.engine.repository;
+
+import dev.sentinel.engine.domain.ClaimedTask;
+import dev.sentinel.engine.domain.NewTask;
+import dev.sentinel.engine.domain.Task;
+import dev.sentinel.engine.domain.TaskFailure;
+import dev.sentinel.engine.domain.TaskStatus;
+import dev.sentinel.engine.repository.support.GuardedUpdate;
+import dev.sentinel.engine.repository.support.RowMappers;
+import dev.sentinel.engine.repository.support.SqlValues;
+import java.time.Duration;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.stereotype.Repository;
+
+/**
+ * Persistence for task instances, which are also the queue entries.
+ *
+ * <p>Two rules hold for every statement in this class and are worth stating once rather than
+ * repeating at each method.
+ *
+ * <p><strong>Every transition is guarded.</strong> No method reads a row, decides, and then writes.
+ * Each conditional {@code UPDATE} restates its precondition in the {@code WHERE} clause so the
+ * decision and the write happen in the same atomic step. That is what makes {@code READ COMMITTED}
+ * sufficient throughout, and what makes it safe for several engine instances to run the same
+ * operation concurrently with no coordination between them.
+ *
+ * <p><strong>Every timestamp comes from {@code now()}.</strong> No caller passes in a JVM instant
+ * for a deadline. Lease expiry compares two values that must originate from one clock.
+ */
+@Repository
+public class TaskRepository {
+
+    private static final String COLUMNS = """
+            id, workflow_id, name, task_type, status, input, output, last_error, last_error_kind,
+            attempt, max_attempts, pending_dependencies, next_attempt_at, lease_expires_at,
+            owner_worker_id, fencing_token, created_at, updated_at
+            """;
+
+    private static final String CLAIM_COLUMNS =
+            "t.id, t.workflow_id, t.name, t.task_type, t.input, t.attempt, t.max_attempts, "
+                    + "t.fencing_token, t.lease_expires_at";
+
+    private final JdbcClient jdbcClient;
+
+    public TaskRepository(JdbcClient jdbcClient) {
+        this.jdbcClient = jdbcClient;
+    }
+
+    // ------------------------------------------------------------------
+    // Writes at submission time
+    // ------------------------------------------------------------------
+
+    /**
+     * Inserts every task of a workflow in one statement and returns the generated ids by task name.
+     *
+     * <p>One statement rather than a loop because the caller needs the ids back to build the
+     * dependency edges, and a per-task round trip would multiply submission latency by the DAG's
+     * size. The row count is bounded by DAG-size validation upstream, so the generated SQL cannot
+     * grow without limit.
+     *
+     * @return task name to generated id, in insertion order
+     */
+    public Map<String, UUID> insertAll(UUID workflowId, List<NewTask> tasks) {
+        if (tasks.isEmpty()) {
+            throw new IllegalArgumentException("a workflow must contain at least one task");
+        }
+
+        StringBuilder sql = new StringBuilder("""
+                INSERT INTO tasks (workflow_id, name, task_type, status, input,
+                                   max_attempts, pending_dependencies, next_attempt_at)
+                VALUES
+                """);
+        Map<String, Object> params = new HashMap<>();
+        params.put("workflowId", workflowId);
+
+        for (int i = 0; i < tasks.size(); i++) {
+            NewTask task = tasks.get(i);
+            if (i > 0) {
+                sql.append(",\n");
+            }
+            sql.append("(:workflowId, :name").append(i)
+                    .append(", :type").append(i)
+                    .append(", :status").append(i)
+                    .append(", CAST(:input").append(i).append(" AS jsonb)")
+                    .append(", :maxAttempts").append(i)
+                    .append(", :pendingDeps").append(i)
+                    .append(", coalesce(CAST(:notBefore").append(i).append(" AS timestamptz), now()))");
+
+            params.put("name" + i, task.name());
+            params.put("type" + i, task.taskType());
+            params.put("status" + i, task.status().name());
+            params.put("input" + i, task.input());
+            params.put("maxAttempts" + i, task.maxAttempts());
+            params.put("pendingDeps" + i, task.pendingDependencies());
+            params.put("notBefore" + i, SqlValues.timestamp(task.notBefore()));
+        }
+        sql.append("\nRETURNING id, name");
+
+        List<Map.Entry<String, UUID>> inserted = jdbcClient.sql(sql.toString())
+                .params(params)
+                .query((rs, rowNum) -> Map.entry(rs.getString("name"), rs.getObject("id", UUID.class)))
+                .list();
+
+        GuardedUpdate.requireExactly(tasks.size(), inserted.size(), "insertTasks", workflowId);
+
+        Map<String, UUID> idsByName = new LinkedHashMap<>();
+        inserted.forEach(entry -> idsByName.put(entry.getKey(), entry.getValue()));
+        return idsByName;
+    }
+
+    // ------------------------------------------------------------------
+    // Reads
+    // ------------------------------------------------------------------
+
+    public Optional<Task> findById(UUID taskId) {
+        return jdbcClient.sql("SELECT " + COLUMNS + " FROM tasks WHERE id = :id")
+                .param("id", taskId)
+                .query(RowMappers.TASK)
+                .optional();
+    }
+
+    public List<Task> findByWorkflowId(UUID workflowId) {
+        return jdbcClient.sql("SELECT " + COLUMNS + " FROM tasks WHERE workflow_id = :id ORDER BY id")
+                .param("id", workflowId)
+                .query(RowMappers.TASK)
+                .list();
+    }
+
+    public Map<TaskStatus, Integer> countByStatus(UUID workflowId) {
+        Map<TaskStatus, Integer> counts = new java.util.EnumMap<>(TaskStatus.class);
+        jdbcClient.sql("SELECT status, count(*) AS n FROM tasks WHERE workflow_id = :id GROUP BY status")
+                .param("id", workflowId)
+                .query((rs, rowNum) -> Map.entry(TaskStatus.valueOf(rs.getString("status")), rs.getInt("n")))
+                .list()
+                .forEach(entry -> counts.put(entry.getKey(), entry.getValue()));
+        return counts;
+    }
+
+    // ------------------------------------------------------------------
+    // The claim
+    // ------------------------------------------------------------------
+
+    /**
+     * Takes ownership of up to {@code batchSize} runnable tasks in a single statement.
+     *
+     * <p>Selection and ownership happen together so there is no window in which a task has been
+     * chosen but not yet claimed. {@code SKIP LOCKED} is what lets many claimers run concurrently:
+     * a claimer that meets a row another transaction is already taking walks past it instead of
+     * blocking, so throughput rises with concurrency instead of collapsing into a queue behind the
+     * head of the btree.
+     *
+     * <p>Under-delivering is correct, not a bug. High contention can return fewer rows than asked
+     * for, or none at all, and callers must treat an empty result as ordinary rather than
+     * hot-spinning on it.
+     *
+     * <p>{@code attempt < max_attempts} is in the predicate so that the claim can never push
+     * {@code attempt} past its bound. The database would reject that anyway via
+     * {@code tasks_attempt_bounds}; the guard means a missed retry check surfaces as an unclaimable
+     * task rather than a failed statement.
+     */
+    public List<ClaimedTask> claimBatch(String workerId, List<String> taskTypes, int batchSize, Duration leaseDuration) {
+        if (taskTypes.isEmpty() || batchSize <= 0) {
+            return List.of();
+        }
+        return jdbcClient.sql("""
+                WITH claimable AS (
+                    SELECT id
+                      FROM tasks
+                     WHERE status = 'PENDING'
+                       AND next_attempt_at <= now()
+                       AND task_type IN (:taskTypes)
+                       AND attempt < max_attempts
+                     ORDER BY next_attempt_at, id
+                     LIMIT :batchSize
+                       FOR UPDATE SKIP LOCKED
+                )
+                UPDATE tasks t
+                   SET status           = 'RUNNING',
+                       owner_worker_id  = :workerId,
+                       fencing_token    = t.fencing_token + 1,
+                       lease_expires_at = now() + (interval '1 second' * :leaseSeconds),
+                       attempt          = t.attempt + 1,
+                       updated_at       = now()
+                  FROM claimable c
+                 WHERE t.id = c.id
+                RETURNING
+                """ + CLAIM_COLUMNS)
+                .param("taskTypes", taskTypes)
+                .param("batchSize", batchSize)
+                .param("workerId", workerId)
+                .param("leaseSeconds", leaseDuration.toSeconds())
+                .query(RowMappers.CLAIMED_TASK)
+                .list();
+    }
+
+    // ------------------------------------------------------------------
+    // Worker-driven transitions, all fenced
+    // ------------------------------------------------------------------
+
+    /**
+     * Extends a lease.
+     *
+     * <p>This is the highest-frequency write in the system, and it touches exactly one column.
+     * {@code lease_expires_at} is indexed nowhere, so this update stays eligible to be a HOT update
+     * and does no index maintenance at all. Adding an index that covers this column would quietly
+     * make every heartbeat in the fleet more expensive.
+     *
+     * @return false if the caller no longer owns the task, which is a definitive answer rather than
+     *         a transient condition
+     */
+    public boolean renewLease(UUID taskId, String workerId, long fencingToken, Duration leaseDuration) {
+        int rows = jdbcClient.sql("""
+                UPDATE tasks
+                   SET lease_expires_at = now() + (interval '1 second' * :leaseSeconds),
+                       updated_at = now()
+                 WHERE id = :id
+                   AND status = 'RUNNING'
+                   AND owner_worker_id = :workerId
+                   AND fencing_token = :fencingToken
+                """)
+                .param("id", taskId)
+                .param("workerId", workerId)
+                .param("fencingToken", fencingToken)
+                .param("leaseSeconds", leaseDuration.toSeconds())
+                .update();
+        return GuardedUpdate.applied(rows, "renewLease", taskId);
+    }
+
+    /** Records success. Clears the lease, which the {@code tasks_lease_consistency} check requires. */
+    public boolean markCompleted(UUID taskId, String workerId, long fencingToken, String output) {
+        int rows = jdbcClient.sql("""
+                UPDATE tasks
+                   SET status = 'COMPLETED',
+                       output = CAST(:output AS jsonb),
+                       owner_worker_id = NULL,
+                       lease_expires_at = NULL,
+                       updated_at = now()
+                 WHERE id = :id
+                   AND status = 'RUNNING'
+                   AND owner_worker_id = :workerId
+                   AND fencing_token = :fencingToken
+                """)
+                .param("id", taskId)
+                .param("workerId", workerId)
+                .param("fencingToken", fencingToken)
+                .param("output", output == null ? "null" : output)
+                .update();
+        return GuardedUpdate.applied(rows, "markCompleted", taskId);
+    }
+
+    /** Records terminal failure: attempts exhausted, or a failure classified as permanent. */
+    public boolean markFailed(UUID taskId, String workerId, long fencingToken, TaskFailure failure) {
+        int rows = jdbcClient.sql("""
+                UPDATE tasks
+                   SET status = 'FAILED',
+                       last_error = :error,
+                       last_error_kind = :errorKind,
+                       owner_worker_id = NULL,
+                       lease_expires_at = NULL,
+                       updated_at = now()
+                 WHERE id = :id
+                   AND status = 'RUNNING'
+                   AND owner_worker_id = :workerId
+                   AND fencing_token = :fencingToken
+                """)
+                .param("id", taskId)
+                .param("workerId", workerId)
+                .param("fencingToken", fencingToken)
+                .param("error", failure.message())
+                .param("errorKind", failure.kind().name())
+                .update();
+        return GuardedUpdate.applied(rows, "markFailed", taskId);
+    }
+
+    /**
+     * Returns a failed task to the queue after a delay.
+     *
+     * <p>The delay is applied to {@code next_attempt_at} rather than held in a scheduler, so a
+     * backoff survives an engine restart with no in-memory timer to rebuild. The claim query
+     * already refuses to take a task before its time, so the queue itself enforces the wait.
+     */
+    public boolean scheduleRetry(
+            UUID taskId, String workerId, long fencingToken, TaskFailure failure, Duration delay) {
+        int rows = jdbcClient.sql("""
+                UPDATE tasks
+                   SET status = 'PENDING',
+                       last_error = :error,
+                       last_error_kind = :errorKind,
+                       next_attempt_at = now() + (interval '1 second' * :delaySeconds),
+                       owner_worker_id = NULL,
+                       lease_expires_at = NULL,
+                       updated_at = now()
+                 WHERE id = :id
+                   AND status = 'RUNNING'
+                   AND owner_worker_id = :workerId
+                   AND fencing_token = :fencingToken
+                   AND attempt < max_attempts
+                """)
+                .param("id", taskId)
+                .param("workerId", workerId)
+                .param("fencingToken", fencingToken)
+                .param("error", failure.message())
+                .param("errorKind", failure.kind().name())
+                .param("delaySeconds", delay.toSeconds())
+                .update();
+        return GuardedUpdate.applied(rows, "scheduleRetry", taskId);
+    }
+
+    // ------------------------------------------------------------------
+    // Scheduler-driven transitions
+    // ------------------------------------------------------------------
+
+    /**
+     * Locks the direct children of a completed task, in ascending id order.
+     *
+     * <p>The ordering is the deadlock defence, not a convenience. Two parents sharing children can
+     * complete concurrently on two engine instances; without a common acquisition order, one
+     * transaction can hold child X while waiting for Y as the other holds Y and waits for X, and
+     * Postgres resolves that by killing one of them. Sorting by id gives every transaction the same
+     * order, so the cycle cannot form.
+     *
+     * <p>Must be called inside the same transaction as the decrement that follows it.
+     */
+    public List<UUID> lockChildrenOfCompletedTask(UUID workflowId, UUID parentTaskId) {
+        return jdbcClient.sql("""
+                SELECT c.id
+                  FROM tasks c
+                  JOIN task_dependencies d ON d.task_id = c.id
+                 WHERE d.workflow_id = :workflowId
+                   AND d.depends_on_task_id = :parentTaskId
+                 ORDER BY c.id
+                   FOR UPDATE OF c
+                """)
+                .param("workflowId", workflowId)
+                .param("parentTaskId", parentTaskId)
+                .query((rs, rowNum) -> rs.getObject("id", UUID.class))
+                .list();
+    }
+
+    /**
+     * Decrements the blocker count of the given children and flips to {@code PENDING} the ones that
+     * just reached zero.
+     *
+     * <p>A counter rather than a "do all my parents look complete" subquery, because the subquery
+     * re-derives on every completion something the previous completion already established, at a
+     * cost proportional to the number of parents.
+     *
+     * <p>The counter cannot drift, because this runs in the same transaction as the guarded update
+     * that moved the parent to {@code COMPLETED}. That update matches exactly one row exactly once;
+     * if it matches nothing, the transaction never reaches this statement.
+     *
+     * @return ids that became claimable
+     */
+    public List<UUID> decrementDependenciesAndFlip(List<UUID> childTaskIds) {
+        if (childTaskIds.isEmpty()) {
+            return List.of();
+        }
+        return jdbcClient.sql("""
+                UPDATE tasks
+                   SET pending_dependencies = pending_dependencies - 1,
+                       status = CASE WHEN pending_dependencies - 1 = 0 THEN 'PENDING' ELSE status END,
+                       updated_at = now()
+                 WHERE id IN (:childIds)
+                   AND status = 'BLOCKED'
+                RETURNING id, status
+                """)
+                .param("childIds", childTaskIds)
+                .query((rs, rowNum) -> Map.entry(
+                        rs.getObject("id", UUID.class), TaskStatus.valueOf(rs.getString("status"))))
+                .list()
+                .stream()
+                .filter(entry -> entry.getValue() == TaskStatus.PENDING)
+                .map(Map.Entry::getKey)
+                .toList();
+    }
+
+    /**
+     * Cancels tasks that can no longer run because an ancestor failed.
+     *
+     * <p>Only non-started tasks are cancellable. A task already {@code RUNNING} is left alone: its
+     * worker is mid-execution and may already have caused an external side effect, so the engine
+     * lets it finish and report rather than pretending it never happened.
+     */
+    public int cancelAll(List<UUID> taskIds) {
+        if (taskIds.isEmpty()) {
+            return 0;
+        }
+        return jdbcClient.sql("""
+                UPDATE tasks
+                   SET status = 'CANCELLED', updated_at = now()
+                 WHERE id IN (:ids)
+                   AND status IN ('BLOCKED', 'PENDING')
+                """)
+                .param("ids", taskIds)
+                .update();
+    }
+
+    // ------------------------------------------------------------------
+    // Reaper
+    // ------------------------------------------------------------------
+
+    /**
+     * Returns tasks whose lease expired to the queue, up to a bounded batch.
+     *
+     * <p>Bounded and {@code SKIP LOCKED} for the same reason the claim is: a hundred workers dying
+     * at once must not turn into one enormous transaction that locks thousands of rows and stalls
+     * every claimer. Several engine instances reaping at the same time divide the work rather than
+     * colliding, which is what keeps the reaper leaderless.
+     *
+     * @return ids that were re-queued
+     */
+    public List<UUID> requeueExpiredLeases(int batchSize, Duration retryDelay) {
+        return jdbcClient.sql("""
+                WITH expired AS (
+                    SELECT id
+                      FROM tasks
+                     WHERE status = 'RUNNING'
+                       AND lease_expires_at < now()
+                       AND attempt < max_attempts
+                     ORDER BY id
+                     LIMIT :batchSize
+                       FOR UPDATE SKIP LOCKED
+                )
+                UPDATE tasks t
+                   SET status = 'PENDING',
+                       owner_worker_id = NULL,
+                       lease_expires_at = NULL,
+                       next_attempt_at = now() + (interval '1 second' * :delaySeconds),
+                       last_error = 'lease expired before the worker reported',
+                       last_error_kind = 'RETRYABLE',
+                       updated_at = now()
+                  FROM expired e
+                 WHERE t.id = e.id
+                RETURNING t.id
+                """)
+                .param("batchSize", batchSize)
+                .param("delaySeconds", retryDelay.toSeconds())
+                .query((rs, rowNum) -> rs.getObject("id", UUID.class))
+                .list();
+    }
+
+    /**
+     * Fails tasks whose lease expired and whose attempts are spent.
+     *
+     * <p>Separate from {@link #requeueExpiredLeases} because the two outcomes are different
+     * decisions, and folding them into one {@code CASE} would hide which one happened from metrics
+     * and from anyone reading the SQL.
+     */
+    public List<UUID> failExhaustedExpiredLeases(int batchSize) {
+        return jdbcClient.sql("""
+                WITH expired AS (
+                    SELECT id
+                      FROM tasks
+                     WHERE status = 'RUNNING'
+                       AND lease_expires_at < now()
+                       AND attempt >= max_attempts
+                     ORDER BY id
+                     LIMIT :batchSize
+                       FOR UPDATE SKIP LOCKED
+                )
+                UPDATE tasks t
+                   SET status = 'FAILED',
+                       owner_worker_id = NULL,
+                       lease_expires_at = NULL,
+                       last_error = 'lease expired after the final attempt',
+                       last_error_kind = 'RETRYABLE',
+                       updated_at = now()
+                  FROM expired e
+                 WHERE t.id = e.id
+                RETURNING t.id
+                """)
+                .param("batchSize", batchSize)
+                .query((rs, rowNum) -> rs.getObject("id", UUID.class))
+                .list();
+    }
+}
