@@ -198,7 +198,7 @@ class TaskLifecycleTest extends AbstractIntegrationTest {
     void cancelDoesNotTouchRunningTasks() {
         ClaimedTask claimed = claimOne();
 
-        assertThat(tasks.cancelAll(List.of(claimed.id()))).isZero();
+        assertThat(tasks.cancelAll(List.of(claimed.id()))).isEmpty();
         assertThat(tasks.findById(claimed.id()).orElseThrow().status()).isEqualTo(TaskStatus.RUNNING);
     }
 
@@ -207,7 +207,7 @@ class TaskLifecycleTest extends AbstractIntegrationTest {
     void cancelAppliesToNotYetStartedTasks() {
         var dag = DagFixtures.singleTask(workflows, tasks, "only");
 
-        assertThat(tasks.cancelAll(List.of(dag.taskId("only")))).isEqualTo(1);
+        assertThat(tasks.cancelAll(List.of(dag.taskId("only")))).containsExactly(dag.taskId("only"));
         assertThat(tasks.findById(dag.taskId("only")).orElseThrow().status()).isEqualTo(TaskStatus.CANCELLED);
     }
 
