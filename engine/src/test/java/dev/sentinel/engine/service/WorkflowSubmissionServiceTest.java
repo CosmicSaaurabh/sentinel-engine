@@ -45,7 +45,7 @@ class WorkflowSubmissionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a submitted diamond is written whole: workflow, tasks, edges and history")
     void submissionWritesTheWholeGraph() {
-        Workflow workflow = submissionService.submit(Workflows.diamond());
+        Workflow workflow = submissionService.submit(Workflows.diamond()).workflow();
 
         assertThat(workflow.status()).isEqualTo(WorkflowStatus.RUNNING);
         assertThat(tasks.findByWorkflowId(workflow.id())).hasSize(4);
@@ -55,7 +55,7 @@ class WorkflowSubmissionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("only dependency-free tasks start claimable; the rest start blocked")
     void onlyRootTasksStartRunnable() {
-        Workflow workflow = submissionService.submit(Workflows.diamond());
+        Workflow workflow = submissionService.submit(Workflows.diamond()).workflow();
 
         assertThat(tasks.countByStatus(workflow.id()))
                 .containsEntry(TaskStatus.PENDING, 1)
@@ -65,7 +65,7 @@ class WorkflowSubmissionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("submission records a workflow event and one scheduled event per runnable task")
     void submissionRecordsHistory() {
-        Workflow workflow = submissionService.submit(Workflows.diamond());
+        Workflow workflow = submissionService.submit(Workflows.diamond()).workflow();
 
         List<OutboxEvent> events = outbox.findByWorkflowId(workflow.id());
         assertThat(events).extracting(OutboxEvent::eventType)
@@ -84,7 +84,7 @@ class WorkflowSubmissionServiceTest extends AbstractIntegrationTest {
                 TaskDefinition.of("a", Workflows.TASK_TYPE, "b"),
                 TaskDefinition.of("b", Workflows.TASK_TYPE, "a"));
 
-        assertThatThrownBy(() -> submissionService.submit(cyclic))
+        assertThatThrownBy(() -> submissionService.submit(cyclic).workflow())
                 .isInstanceOf(InvalidWorkflowException.class);
 
         assertThat(jdbcClient.sql("SELECT count(*) FROM workflows").query(Integer.class).single())
@@ -98,8 +98,8 @@ class WorkflowSubmissionServiceTest extends AbstractIntegrationTest {
         WorkflowDefinition definition = new WorkflowDefinition(
                 "billing", "invoice-2026-08", null, Workflows.diamond().tasks());
 
-        Workflow first = submissionService.submit(definition);
-        Workflow second = submissionService.submit(definition);
+        Workflow first = submissionService.submit(definition).workflow();
+        Workflow second = submissionService.submit(definition).workflow();
 
         assertThat(second.id()).isEqualTo(first.id());
         assertThat(jdbcClient.sql("SELECT count(*) FROM tasks").query(Integer.class).single())
@@ -112,7 +112,7 @@ class WorkflowSubmissionServiceTest extends AbstractIntegrationTest {
     void scheduledWorkflowIsNotClaimableEarly() {
         Instant triggerAt = Instant.now().plus(Duration.ofHours(1));
         Workflow workflow = submissionService.submit(new WorkflowDefinition(
-                "later", null, triggerAt, Workflows.singleTask().tasks()));
+                "later", null, triggerAt, Workflows.singleTask().tasks())).workflow();
 
         assertThat(workflow.status()).isEqualTo(WorkflowStatus.RUNNING);
         assertThat(tasks.countByStatus(workflow.id())).containsEntry(TaskStatus.PENDING, 1);
@@ -124,7 +124,7 @@ class WorkflowSubmissionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a chain submits with each task blocked on the one before it")
     void chainIsWrittenInOrder() {
-        Workflow workflow = submissionService.submit(Workflows.chain("a", "b", "c"));
+        Workflow workflow = submissionService.submit(Workflows.chain("a", "b", "c")).workflow();
 
         List<Task> stored = tasks.findByWorkflowId(workflow.id());
         assertThat(stored).filteredOn(task -> task.status() == TaskStatus.PENDING)

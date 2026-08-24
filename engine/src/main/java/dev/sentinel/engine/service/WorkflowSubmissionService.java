@@ -80,7 +80,7 @@ public class WorkflowSubmissionService {
      * @throws dev.sentinel.engine.error.InvalidWorkflowException if the DAG is malformed
      * @throws dev.sentinel.engine.error.AdmissionRejectedException if the fleet is saturated
      */
-    public Workflow submit(WorkflowDefinition definition) {
+    public SubmissionResult submit(WorkflowDefinition definition) {
         ValidatedDag dag = validator.validate(definition);
 
         return transactionTemplate.execute(status -> {
@@ -89,7 +89,7 @@ public class WorkflowSubmissionService {
                 deduplicated.increment();
                 log.debug("submission key {} already produced workflow {}",
                         definition.submissionKey(), existing.get().id());
-                return existing.get();
+                return new SubmissionResult(existing.get(), true);
             }
 
             // Capacity is checked inside the transaction so the decision and the write see the same
@@ -98,17 +98,27 @@ public class WorkflowSubmissionService {
             admissionController.requireCapacity();
 
             try {
-                return write(dag);
+                return new SubmissionResult(write(dag), false);
             } catch (DuplicateKeyException e) {
                 // Two concurrent submissions of the same idempotency key. The unique index is what
                 // actually prevents the duplicate; this branch just turns the losing writer's error
                 // into the same answer the winner got. Checking first and inserting second could
                 // never have prevented this on its own, which is why the index exists.
                 deduplicated.increment();
-                return findExistingSubmission(definition.submissionKey())
-                        .orElseThrow(() -> e);
+                return new SubmissionResult(
+                        findExistingSubmission(definition.submissionKey()).orElseThrow(() -> e), true);
             }
         });
+    }
+
+    /**
+     * @param workflow the execution the caller should refer to from now on, whether it was created
+     *        by this call or by an earlier one
+     * @param deduplicated true when an existing submission key matched and no new work was created.
+     *        The caller gets the same workflow either way; this only says which happened, which is
+     *        what a client needs to know when deciding whether its retry actually did anything
+     */
+    public record SubmissionResult(Workflow workflow, boolean deduplicated) {
     }
 
     private Optional<Workflow> findExistingSubmission(String submissionKey) {

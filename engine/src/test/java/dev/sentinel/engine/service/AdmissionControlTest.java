@@ -34,7 +34,7 @@ class AdmissionControlTest extends AbstractIntegrationTest {
     void submissionsAreAcceptedBelowCapacity() {
         capacity.addInFlight(0, 1);
 
-        assertThat(submissionService.submit(Workflows.singleTask())).isNotNull();
+        assertThat(submissionService.submit(Workflows.singleTask()).workflow()).isNotNull();
     }
 
     @Test
@@ -43,7 +43,7 @@ class AdmissionControlTest extends AbstractIntegrationTest {
         capacity.addInFlight(0, 2);
 
         AdmissionRejectedException rejected = catchThrowableOfType(
-                AdmissionRejectedException.class, () -> submissionService.submit(Workflows.singleTask()));
+                AdmissionRejectedException.class, () -> submissionService.submit(Workflows.singleTask()).workflow());
 
         assertThat(rejected).isNotNull();
         assertThat(rejected.getMessage()).contains("2 of 2 task slots");
@@ -59,7 +59,7 @@ class AdmissionControlTest extends AbstractIntegrationTest {
 
         var hints = java.util.stream.IntStream.range(0, 30)
                 .mapToObj(i -> catchThrowableOfType(
-                        AdmissionRejectedException.class, () -> submissionService.submit(Workflows.singleTask())))
+                        AdmissionRejectedException.class, () -> submissionService.submit(Workflows.singleTask()).workflow()))
                 .map(AdmissionRejectedException::retryAfter)
                 .distinct()
                 .toList();
@@ -76,12 +76,12 @@ class AdmissionControlTest extends AbstractIntegrationTest {
     void capacityRecovers() {
         capacity.addInFlight(0, 2);
         assertThat(catchThrowableOfType(
-                AdmissionRejectedException.class, () -> submissionService.submit(Workflows.singleTask())))
+                AdmissionRejectedException.class, () -> submissionService.submit(Workflows.singleTask()).workflow()))
                 .isNotNull();
 
         capacity.addInFlight(0, -2);
 
-        assertThat(submissionService.submit(Workflows.singleTask()))
+        assertThat(submissionService.submit(Workflows.singleTask()).workflow())
                 .as("saturation must be a transient condition, not a poisoned engine")
                 .isNotNull();
     }

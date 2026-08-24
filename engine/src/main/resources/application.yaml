@@ -23,7 +23,39 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: false
 
+  grpc:
+    server:
+      # The worker protocol gets its own port. It is a separate protocol with separate deadline
+      # and keepalive semantics from the management HTTP endpoints, and mixing them would mean one
+      # set of timeouts governing two very different traffic shapes.
+      port: 9090
+      keepalive:
+        # Detects a peer that has gone away without saying so: a NAT entry expiring, a middlebox
+        # forgetting the connection, a laptop lid closing. Without this the engine would hold long
+        # polls for workers that no longer exist.
+        time: 60s
+        timeout: 20s
+      inbound:
+        message:
+          max-size: 4194304B
+
 sentinel:
+  grpc:
+    # Ceiling on how long the engine holds a poll open, whatever the client asks for. A client
+    # cannot pin a waiter indefinitely.
+    max-poll-wait: 20s
+    # How often a parked poll re-attempts the claim. This single number is both the dispatch
+    # latency a worker sees and the total query load an idle fleet generates, so it is the knob to
+    # turn when trading one against the other.
+    poll-retry-interval: 250ms
+    # Virtual threads make a waiting poll cheap, not free. An unbounded number of cheap waiters is
+    # still an unbounded queue, so the overflow is shed rather than parked.
+    max-waiting-polls: 2000
+    waiting-poll-retry-after: 1s
+    # Far below gRPC's own 4 MB message cap, because the binding constraint is not the wire: every
+    # payload lands in a jsonb column and is copied again into the outbox. Large data belongs in
+    # storage the client owns, passed through the workflow as a reference.
+    max-payload-bytes: 262144
   dag:
     # Submission writes a whole DAG inside one transaction, so the DAG has to be bounded or the
     # transaction is not. A rejected oversized submission is a clear error; an accepted one is a

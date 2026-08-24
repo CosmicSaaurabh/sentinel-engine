@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package sentinel.v1;
+
+import "google/protobuf/timestamp.proto";
+import "sentinel/v1/common.proto";
+
+option java_package = "dev.sentinel.proto.v1";
+option java_multiple_files = true;
+option java_outer_classname = "WorkflowProto";
+
+// Submitting workflows and asking about them. Used by workflow authors, not by workers.
+service WorkflowService {
+
+  // Validates and durably records a DAG. Either the whole graph is written or none of it is.
+  //
+  // Errors: INVALID_ARGUMENT for a malformed DAG (the message lists every violation, not just
+  // the first), RESOURCE_EXHAUSTED with a retry hint when the fleet is saturated, UNAVAILABLE
+  // when the engine cannot reach its database.
+  rpc SubmitWorkflow(SubmitWorkflowRequest) returns (SubmitWorkflowResponse);
+
+  // Current state of a workflow and all of its tasks. NOT_FOUND for an unknown id.
+  rpc GetWorkflowStatus(GetWorkflowStatusRequest) returns (GetWorkflowStatusResponse);
+}
+
+message TaskDefinition {
+  // Unique within this submission. Dependencies are declared by name, which is what makes it
+  // structurally impossible to depend on a task in another workflow.
+  string name = 1;
+
+  // Routing key: which workers are eligible to run this. Letters, digits, dot, underscore, dash.
+  string task_type = 2;
+
+  // JSON document handed to the handler. Capped at 256 KB; see workflow input limits.
+  string input = 3;
+
+  // Absent means "use the engine default", so a caller that does not care need not know it.
+  optional int32 max_attempts = 4;
+
+  // Names of tasks in this same submission that must complete first.
+  repeated string depends_on = 5;
+}
+
+message SubmitWorkflowRequest {
+  string name = 1;
+
+  // Idempotency key. Resubmitting the same key returns the existing execution rather than
+  // starting a second one, which is what makes a client safe to retry a submission whose
+  // response it never saw.
+  optional string submission_key = 2;
+
+  // Earliest start. Applied to the tasks with no dependencies, since those are the only ones a
+  // trigger time can meaningfully delay.
+  optional google.protobuf.Timestamp scheduled_at = 3;
+
+  repeated TaskDefinition tasks = 4;
+}
+
+message SubmitWorkflowResponse {
+  string workflow_id = 1;
+  WorkflowStatus status = 2;
+
+  // True when an existing submission key matched and no new work was created. The client gets
+  // the same workflow id either way; this only says which happened.
+  bool deduplicated = 3;
+}
+
+message GetWorkflowStatusRequest {
+  string workflow_id = 1;
+}
+
+message TaskSummary {
+  string task_id = 1;
+  string name = 2;
+  string task_type = 3;
+  TaskStatus status = 4;
+  int32 attempt = 5;
+  int32 max_attempts = 6;
+  optional string output = 7;
+  optional string last_error = 8;
+  optional FailureKind last_error_kind = 9;
+}
+
+message GetWorkflowStatusResponse {
+  string workflow_id = 1;
+  string name = 2;
+  WorkflowStatus status = 3;
+  google.protobuf.Timestamp created_at = 4;
+  optional google.protobuf.Timestamp started_at = 5;
+  optional google.protobuf.Timestamp finished_at = 6;
+  repeated TaskSummary tasks = 7;
+}

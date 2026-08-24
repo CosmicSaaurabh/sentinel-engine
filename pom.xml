@@ -19,6 +19,15 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>21</maven.compiler.release>
         <spring-boot.version>4.1.0</spring-boot.version>
+        <!--
+            Pinned to what spring-boot-dependencies 4.1.0 manages. They are repeated here because
+            the Boot BOM is imported rather than inherited, so its properties are not visible to
+            this build, and the protobuf plugin needs the exact protoc and grpc plugin versions to
+            download the right binaries.
+        -->
+        <protobuf-java.version>4.34.2</protobuf-java.version>
+        <grpc-java.version>1.80.0</grpc-java.version>
+        <protobuf-maven-plugin.version>5.1.8</protobuf-maven-plugin.version>
     </properties>
 
     <dependencyManagement>

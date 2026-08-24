@@ -18,6 +18,7 @@ import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -110,6 +111,45 @@ public class TaskCompletionService {
         if (!tasks.renewLease(taskId, workerId, fencingToken, claimProperties.leaseDuration())) {
             fenced.increment();
             throw fencingFailure(taskId, workerId, fencingToken);
+        }
+    }
+
+    /**
+     * Renews every lease a worker holds, and reports per-lease outcomes.
+     *
+     * <p>Deliberately does not throw when a lease has been lost. A worker running sixteen tasks
+     * that has been reaped on one of them still needs to know that the other fifteen are healthy,
+     * and failing the whole call would hide that. The worker's contract is to stop executing the
+     * ones it is told it has lost, and to keep going with the rest.
+     *
+     * @param fencingTokensByTaskId what the worker believes it holds
+     */
+    public HeartbeatResult heartbeatAll(String workerId, Map<UUID, Long> fencingTokensByTaskId) {
+        if (fencingTokensByTaskId.isEmpty()) {
+            return new HeartbeatResult(List.of(), List.of());
+        }
+
+        List<UUID> renewed = tasks.renewLeases(workerId, fencingTokensByTaskId, claimProperties.leaseDuration());
+        List<UUID> lost = fencingTokensByTaskId.keySet().stream()
+                .filter(taskId -> !renewed.contains(taskId))
+                .toList();
+
+        if (!lost.isEmpty()) {
+            fenced.increment(lost.size());
+            log.warn("worker {} has lost {} lease(s): {}", workerId, lost.size(), lost);
+        }
+        return new HeartbeatResult(renewed, lost);
+    }
+
+    /**
+     * @param renewed leases that were extended
+     * @param lost leases the worker no longer holds and must stop working on
+     */
+    public record HeartbeatResult(List<UUID> renewed, List<UUID> lost) {
+
+        public HeartbeatResult {
+            renewed = List.copyOf(renewed);
+            lost = List.copyOf(lost);
         }
     }
 

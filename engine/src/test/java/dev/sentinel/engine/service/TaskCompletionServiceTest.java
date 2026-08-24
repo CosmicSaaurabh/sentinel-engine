@@ -58,7 +58,7 @@ class TaskCompletionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("completing a workflow's only task settles the workflow too")
     void completingTheLastTaskSettlesTheWorkflow() {
-        Workflow workflow = submissionService.submit(Workflows.singleTask());
+        Workflow workflow = submissionService.submit(Workflows.singleTask()).workflow();
         ClaimedTask claimed = claimOne();
 
         assertThat(completionService.complete(claimed.id(), "worker-1", claimed.fencingToken(), "{\"ok\":1}"))
@@ -72,7 +72,7 @@ class TaskCompletionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("completing gives the task slot back to admission control")
     void completingReleasesCapacity() {
-        submissionService.submit(Workflows.singleTask());
+        submissionService.submit(Workflows.singleTask()).workflow();
         ClaimedTask claimed = claimOne();
         assertThat(capacity.totalInFlight()).isEqualTo(1);
 
@@ -84,7 +84,7 @@ class TaskCompletionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a duplicate report from the rightful owner is accepted as already recorded")
     void duplicateReportIsNotAnError() {
-        submissionService.submit(Workflows.singleTask());
+        submissionService.submit(Workflows.singleTask()).workflow();
         ClaimedTask claimed = claimOne();
         completionService.complete(claimed.id(), "worker-1", claimed.fencingToken(), "{}");
 
@@ -100,7 +100,7 @@ class TaskCompletionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a worker that lost its lease is refused, and told so explicitly")
     void fencedWorkerIsRefused() {
-        submissionService.submit(Workflows.singleTask());
+        submissionService.submit(Workflows.singleTask()).workflow();
         ClaimedTask original = claimOne();
         expireLease(original.id());
         tasks.requeueExpiredLeases(10, Duration.ZERO);
@@ -120,7 +120,7 @@ class TaskCompletionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a heartbeat from a fenced worker is refused, which is its signal to stop working")
     void fencedHeartbeatIsRefused() {
-        submissionService.submit(Workflows.singleTask());
+        submissionService.submit(Workflows.singleTask()).workflow();
         ClaimedTask original = claimOne();
         expireLease(original.id());
         tasks.requeueExpiredLeases(10, Duration.ZERO);
@@ -134,7 +134,7 @@ class TaskCompletionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a heartbeat from the rightful owner extends the lease")
     void heartbeatExtendsTheLease() {
-        submissionService.submit(Workflows.singleTask());
+        submissionService.submit(Workflows.singleTask()).workflow();
         ClaimedTask claimed = claimOne();
 
         completionService.heartbeat(claimed.id(), "worker-1", claimed.fencingToken());
@@ -150,7 +150,7 @@ class TaskCompletionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a retryable failure returns the task to the queue behind a backoff")
     void retryableFailureIsRescheduled() {
-        Workflow workflow = submissionService.submit(Workflows.singleTask());
+        Workflow workflow = submissionService.submit(Workflows.singleTask()).workflow();
         ClaimedTask claimed = claimOne();
 
         completionService.fail(claimed.id(), "worker-1", claimed.fencingToken(),
@@ -169,7 +169,7 @@ class TaskCompletionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a permanent failure goes terminal immediately, however many attempts remain")
     void permanentFailureSkipsRetries() {
-        Workflow workflow = submissionService.submit(Workflows.singleTask());
+        Workflow workflow = submissionService.submit(Workflows.singleTask()).workflow();
         ClaimedTask claimed = claimOne();
         assertThat(claimed.attempt()).isLessThan(claimed.maxAttempts());
 
@@ -184,7 +184,7 @@ class TaskCompletionServiceTest extends AbstractIntegrationTest {
     @DisplayName("a retryable failure goes terminal once the attempt budget is spent")
     void retriesStopWhenAttemptsRunOut() {
         Workflow workflow = submissionService.submit(new WorkflowDefinition("one-shot", null, null,
-                List.of(new TaskDefinition("only", Workflows.TASK_TYPE, "{}", 1, List.of()))));
+                List.of(new TaskDefinition("only", Workflows.TASK_TYPE, "{}", 1, List.of())))).workflow();
         ClaimedTask claimed = claimOne();
 
         completionService.fail(claimed.id(), "worker-1", claimed.fencingToken(),
@@ -199,7 +199,7 @@ class TaskCompletionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("failing gives the task slot back, exactly as completing does")
     void failingReleasesCapacity() {
-        submissionService.submit(Workflows.singleTask());
+        submissionService.submit(Workflows.singleTask()).workflow();
         ClaimedTask claimed = claimOne();
 
         completionService.fail(claimed.id(), "worker-1", claimed.fencingToken(),
@@ -213,7 +213,7 @@ class TaskCompletionServiceTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a retried task can be claimed again with a fresh fencing token")
     void retriedTaskRunsAgain() {
-        submissionService.submit(Workflows.singleTask());
+        submissionService.submit(Workflows.singleTask()).workflow();
         ClaimedTask first = claimOne();
         completionService.fail(first.id(), "worker-1", first.fencingToken(), FailureKind.RETRYABLE, "blip");
         makeClaimableNow(first.id());

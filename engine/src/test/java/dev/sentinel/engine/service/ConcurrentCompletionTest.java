@@ -79,7 +79,7 @@ class ConcurrentCompletionTest extends AbstractIntegrationTest {
         AtomicInteger failures = new AtomicInteger();
 
         for (int round = 0; round < ROUNDS; round++) {
-            Workflow workflow = submissionService.submit(Workflows.diamond());
+            Workflow workflow = submissionService.submit(Workflows.diamond()).workflow();
             completeAll(claim(10));
 
             List<ClaimedTask> branches = claim(10);
