@@ -87,6 +87,15 @@ message AssignedTask {
   // When the engine stops waiting and may give this task to someone else. From the database
   // clock, never from an engine JVM.
   google.protobuf.Timestamp lease_expires_at = 9;
+
+  // W3C traceparent for the workflow this task belongs to, so a worker's own spans can be joined
+  // to the trace that started when the workflow was submitted.
+  //
+  // Carried in the message rather than in gRPC metadata on purpose. Metadata would propagate the
+  // trace of the poll call, and a poll is not the thing anyone wants to trace: it may return
+  // several tasks from several workflows, and it may have been waiting twenty seconds for work
+  // that has nothing to do with the caller. The task carries its own workflow's context.
+  optional string trace_context = 10;
 }
 
 message PollForTasksResponse {

@@ -64,10 +64,12 @@ public class TaskCompletionService {
     private final ClaimProperties claimProperties;
     private final TransactionTemplate transactionTemplate;
 
+    private final MeterRegistry meterRegistry;
     private final Counter completed;
     private final Counter retried;
     private final Counter failed;
     private final Counter fenced;
+    private final Counter heartbeatsRenewed;
 
     private volatile int shardCount;
 
@@ -91,7 +93,12 @@ public class TaskCompletionService {
         this.failures = failures;
         this.claimProperties = claimProperties;
         this.transactionTemplate = transactionTemplate;
+        this.meterRegistry = meterRegistry;
         this.completed = Counter.builder("sentinel.task.completed").register(meterRegistry);
+        this.heartbeatsRenewed = Counter.builder("sentinel.heartbeat.renewed")
+                .description("leases extended; compare against sentinel.task.fenced_out to see "
+                        + "what fraction of a fleet is losing work it thought it had")
+                .register(meterRegistry);
         this.retried = Counter.builder("sentinel.task.retried").register(meterRegistry);
         this.failed = Counter.builder("sentinel.task.failed").register(meterRegistry);
         this.fenced = Counter.builder("sentinel.task.fenced_out")
@@ -140,6 +147,9 @@ public class TaskCompletionService {
                 .filter(taskId -> !renewed.contains(taskId))
                 .toList();
 
+        if (!renewed.isEmpty()) {
+            heartbeatsRenewed.increment(renewed.size());
+        }
         if (!lost.isEmpty()) {
             fenced.increment(lost.size());
             log.warn("worker {} has lost {} lease(s): {}", workerId, lost.size(), lost);
@@ -177,6 +187,7 @@ public class TaskCompletionService {
             settleWorkflowIfFinished(task.workflowId());
 
             completed.increment();
+            recordEndToEndLatency(task);
             return CompletionOutcome.RECORDED;
         });
     }
@@ -322,6 +333,26 @@ public class TaskCompletionService {
     // ------------------------------------------------------------------
     // Shared
     // ------------------------------------------------------------------
+
+    /**
+     * How long a task took from being written to being finished.
+     *
+     * <p>Tagged by task type and nothing finer. Task id as a label would be unbounded, which is the
+     * classic way to kill a Prometheus instance: every task instance would create its own time
+     * series and the cardinality would grow forever.
+     *
+     * <p>This measures wall-clock time from submission, so it includes queue wait and every retry,
+     * not just execution. That is deliberate: it is the number a caller actually experiences, and
+     * execution time alone would look healthy while a workflow sat in a backlog for an hour.
+     */
+    private void recordEndToEndLatency(Task task) {
+        io.micrometer.core.instrument.Timer.builder("sentinel.task.duration")
+                .description("submission to terminal state, including queue wait and retries")
+                .tag("task_type", task.taskType())
+                .publishPercentiles(0.5, 0.95, 0.99)
+                .register(meterRegistry)
+                .record(java.time.Duration.between(task.createdAt(), task.updatedAt()));
+    }
 
     private void settleWorkflowIfFinished(UUID workflowId) {
         if (workflows.completeIfAllTasksTerminal(workflowId)) {

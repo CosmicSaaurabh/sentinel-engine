@@ -88,7 +88,8 @@ public final class RowMappers {
                 rs.getInt("attempt"),
                 rs.getInt("max_attempts"),
                 rs.getLong("fencing_token"),
-                instant(rs, "lease_expires_at"));
+                instant(rs, "lease_expires_at"),
+                rs.getString("trace_context"));
     }
 
     private static OutboxEvent mapOutboxEvent(ResultSet rs, int rowNum) throws SQLException {

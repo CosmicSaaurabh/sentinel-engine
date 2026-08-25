@@ -90,7 +90,7 @@ public final class ProtoMappers {
     // ------------------------------------------------------------------
 
     public static AssignedTask toAssignedTask(ClaimedTask task) {
-        return AssignedTask.newBuilder()
+        AssignedTask.Builder builder = AssignedTask.newBuilder()
                 .setTaskId(task.id().toString())
                 .setWorkflowId(task.workflowId().toString())
                 .setName(task.name())
@@ -99,8 +99,12 @@ public final class ProtoMappers {
                 .setAttempt(task.attempt())
                 .setMaxAttempts(task.maxAttempts())
                 .setFencingToken(task.fencingToken())
-                .setLeaseExpiresAt(toTimestamp(task.leaseExpiresAt()))
-                .build();
+                .setLeaseExpiresAt(toTimestamp(task.leaseExpiresAt()));
+
+        if (task.traceContext() != null) {
+            builder.setTraceContext(task.traceContext());
+        }
+        return builder.build();
     }
 
     public static GetWorkflowStatusResponse toStatusResponse(Workflow workflow, List<Task> tasks) {

@@ -7,6 +7,36 @@ Revisit this file periodically to revise.
 ## Entry Template
 
 ```
+### 2026-08-25 - A gauge that runs a query runs it on the scrape path
+- Context: exposing queue depth by status as a Prometheus metric.
+- What I learned: Micrometer evaluates a gauge every time Prometheus scrapes it, so a gauge backed by `SELECT count(*) ... GROUP BY status` puts a full aggregate over the highest-churn table in the system on the scrape path, several times a minute, from every instance at once. Worse, the cost grows with the table, so monitoring gets more expensive exactly as the system gets busier, and a scrape storm during an incident adds load precisely when there is least to spare. Refreshing into an `AtomicLong` on a schedule you control decouples the two; the value is a few seconds stale, which for a depth trend is not a cost at all.
+- Gotcha: also learned that a scheduled refresh which throws is silently cancelled, and frozen gauges are worse than missing ones, because a flat line reads as a healthy steady state.
+- Reference: engine/src/main/java/dev/sentinel/engine/infra/QueueMetrics.java
+
+### 2026-08-25 - Trace context belongs on the workflow, not in the poll's metadata
+- Context: propagating trace context from the engine to a worker so a task's spans join the trace that submitted it.
+- What I learned: the reflex is to put trace context in gRPC metadata, which is where it normally lives. That is wrong here, because it would propagate the trace of the *poll call*, and a poll is not a thing anyone wants to trace: it can return several tasks belonging to several unrelated workflows, and it may have spent twenty seconds waiting for work that has nothing to do with the worker that eventually received it. The context has to travel with the task, in the message. It also has to be stored rather than held in memory, because the workflow outlives the submitting request by minutes or hours.
+- Gotcha: the SDK carries no tracing library, because it carries no framework, so it can expose the context and put the trace id in MDC but cannot emit spans. That boundary is a consequence of the dependency rule rather than an oversight, and writing it down stops someone hunting for spans that were never emitted.
+- Reference: docs/high-level-design/HLD-002-grpc-transport.md, engine/src/main/java/dev/sentinel/engine/infra/TraceContext.java
+
+### 2026-08-25 - MDC is thread-local and thread pools are reused
+- Context: putting workflow and task ids on every log line, in both the engine and the SDK.
+- What I learned: setting MDC without restoring it is worse than not setting it at all. Engine request threads and SDK activity threads are pooled, so a value left behind reappears on the next unrelated piece of work that lands on the same thread; the logs are then confidently wrong and every conclusion drawn from them is suspect. The fix is to scope it, restoring the previous value rather than clearing, since contexts nest. Making the only entry point a try-with-resources or a scoped helper means the restore cannot be forgotten.
+- Gotcha: `-Xlint` rejects an unused try-with-resources variable, which pushed the SDK to an explicit try/finally - and that turned out to read better anyway, since the context needs to cover the catch blocks too so the SDK's own warnings carry the ids.
+- Reference: engine/src/main/java/dev/sentinel/engine/infra/TaskLogContext.java, worker-sdk/src/main/java/dev/sentinel/worker/LogContext.java
+
+### 2026-08-25 - Full jitter makes a schedule untestable by sampling, so test the bound instead
+- Context: the requirement that retry attempt timestamps match the backoff schedule within tolerance.
+- What I learned: with full jitter the delay is uniform over zero to the ceiling, so any single measurement is consistent with almost any schedule and asserting on one sample is asserting on luck. The property worth pinning is the one a runaway retry would actually violate: no delay ever exceeds its attempt's ceiling, and the ceiling doubles. The exact schedule is then pinned separately in a unit test by injecting a generator that always returns the top of the range.
+- Gotcha: the same non-determinism silently broke an unrelated metrics test, where a retried task was sometimes immediately claimable because the jitter happened to pick nearly zero. A test about a gauge should pin the deadline rather than inherit the schedule's randomness.
+- Reference: engine/src/test/java/dev/sentinel/engine/service/RetryAndDeadLetterTest.java
+
+### 2026-08-25 - Recovery ordering: fail the exhausted before re-queueing the rest
+- Context: writing the reaper pass that handles expired leases.
+- What I learned: the two branches look independent and are not. Re-queueing first moves a task to `PENDING`, where the exhausted-attempts query can no longer see it; it is then claimed, immediately violates `attempt < max_attempts`, and becomes invisible in the queue forever with no error anywhere. Doing the terminal branch first means every task is considered by exactly one branch. The general lesson is that when two queries select from overlapping sets and both mutate, the order they run in is part of the design rather than an implementation detail.
+- Gotcha: the re-queue delay has the same shape of trap. Jittering it per batch instead of per task removes the lock contention and then recreates the stampede one step later, which is the more damaging half of the problem.
+- Reference: docs/low-level-design/LLD-003-retry-reaper-idempotency.md section 4.2
+
 ### 2026-08-25 - A queue in front of an activity pool converts directly into duplicate execution
 - Context: sizing the worker SDK's executor, where the obvious design is a bounded queue in front of a fixed thread pool.
 - What I learned: the usual reasoning about queues does not apply when the queued item holds a lease. A task reaches the pool only after being claimed, and a claimed task is one the engine believes is being worked on. Sitting in a queue makes no progress towards anything the engine measures, so queue depth converts one-for-one into lease expiry, re-queue, and the same work running twice. A bounded queue does not fix this; it only chooses how much duplicate execution to permit. The correct shape is a `SynchronousQueue` plus a semaphore the poller must acquire before asking for work, so the worker never claims what it cannot start immediately.

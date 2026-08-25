@@ -30,14 +30,25 @@ public class WorkflowRepository {
     }
 
     public Workflow insert(NewWorkflow workflow) {
+        return insert(workflow, null);
+    }
+
+    /**
+     * @param traceContext W3C traceparent of the submitting request, or null when the caller is not
+     *        tracing. Stored rather than kept in memory because the workflow outlives the request
+     *        that created it, and a task claimed twenty minutes later still needs to join the trace
+     */
+    public Workflow insert(NewWorkflow workflow, String traceContext) {
         return jdbcClient.sql("""
-                INSERT INTO workflows (name, submission_key, scheduled_at)
-                VALUES (:name, :submissionKey, coalesce(CAST(:scheduledAt AS timestamptz), now()))
+                INSERT INTO workflows (name, submission_key, scheduled_at, trace_context)
+                VALUES (:name, :submissionKey, coalesce(CAST(:scheduledAt AS timestamptz), now()),
+                        :traceContext)
                 RETURNING
                 """ + COLUMNS)
                 .param("name", workflow.name())
                 .param("submissionKey", workflow.submissionKey())
                 .param("scheduledAt", SqlValues.timestamp(workflow.scheduledAt()))
+                .param("traceContext", traceContext)
                 .query(RowMappers.WORKFLOW)
                 .single();
     }

@@ -205,6 +205,7 @@ final class GrpcEngineClient implements EngineClient {
                 task.getInput(),
                 task.getAttempt(),
                 task.getMaxAttempts(),
-                task.getFencingToken());
+                task.getFencingToken(),
+                task.hasTraceContext() ? task.getTraceContext() : null);
     }
 }

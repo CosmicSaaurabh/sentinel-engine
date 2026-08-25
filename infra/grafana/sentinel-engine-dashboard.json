@@ -1,0 +1,172 @@
+{
+  "title": "Sentinel Engine",
+  "uid": "sentinel-engine",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "tags": ["sentinel"],
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "Instance",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": "label_values(sentinel_queue_depth, instance)",
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Is work flowing?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Queue depth by status",
+      "description": "PENDING climbing while RUNNING is flat means the fleet is too small. Both flat while nothing completes means the fleet is stuck.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum by (status) (sentinel_queue_depth{instance=~\"$instance\"})",
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Claimable now vs PENDING",
+      "description": "A gap means tasks are PENDING but waiting out a retry backoff. A large persistent gap is a retry storm, not a backlog, and adding workers will not help.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "sum(sentinel_queue_claimable{instance=~\"$instance\"})",
+          "legendFormat": "claimable"
+        },
+        {
+          "expr": "sum(sentinel_queue_depth{status=\"PENDING\", instance=~\"$instance\"})",
+          "legendFormat": "pending"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Claim rate and empty polls",
+      "description": "Empty polls dominating is normal for an idle fleet. Empty polls dominating while queue depth is high means claims are failing or workers are asking for types nobody produces.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(rate(sentinel_claim_tasks_total{instance=~\"$instance\"}[1m]))", "legendFormat": "tasks claimed/s" },
+        { "expr": "sum(rate(sentinel_claim_empty_polls_total{instance=~\"$instance\"}[1m]))", "legendFormat": "empty polls/s" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Claim latency",
+      "description": "Time to claim a batch including commit. A rise here with flat throughput usually means connection pool contention rather than a slow query.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(sentinel_claim_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "legendFormat": "p99" },
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(sentinel_claim_duration_seconds_bucket{instance=~\"$instance\"}[5m])))", "legendFormat": "p50" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "row",
+      "title": "Is work succeeding?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Task outcomes",
+      "description": "Retries rising before failures is the early warning; by the time failures rise, the attempt budgets have already been spent.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(rate(sentinel_task_completed_total{instance=~\"$instance\"}[1m]))", "legendFormat": "completed/s" },
+        { "expr": "sum(rate(sentinel_task_retried_total{instance=~\"$instance\"}[1m]))", "legendFormat": "retried/s" },
+        { "expr": "sum(rate(sentinel_task_failed_total{instance=~\"$instance\"}[1m]))", "legendFormat": "failed/s" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "End-to-end task duration by type",
+      "description": "Submission to terminal state, so it includes queue wait and every retry. This is what a caller actually experiences; execution time alone can look healthy while a workflow sits in a backlog.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, task_type) (rate(sentinel_task_duration_seconds_bucket{instance=~\"$instance\"}[5m])))",
+          "legendFormat": "{{task_type}} p95"
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "row",
+      "title": "Is the fleet healthy?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 26 }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Lease recovery",
+      "description": "Steady re-queues mean workers are dying or stalling. Terminal reaper failures mean tasks are exhausting their budget without anyone ever reporting on them, which points at the fleet rather than the tasks.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(rate(sentinel_reaper_requeued_total{instance=~\"$instance\"}[5m]))", "legendFormat": "re-queued/s" },
+        { "expr": "sum(rate(sentinel_reaper_failed_total{instance=~\"$instance\"}[5m]))", "legendFormat": "failed terminally/s" }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Expired leases awaiting recovery",
+      "description": "The reaper's own backlog. Every pass looks healthy while this climbs, so this is the only signal that recovery is losing ground. It should sit near zero.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 27 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "max(sentinel_reaper_expired_backlog{instance=~\"$instance\"})", "legendFormat": "expired, unreaped" }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Heartbeats renewed vs leases lost",
+      "description": "Lost leases are workers discovering their work was taken away. A steady trickle under load usually means the heartbeat interval is too close to the lease duration.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(rate(sentinel_heartbeat_renewed_total{instance=~\"$instance\"}[1m]))", "legendFormat": "renewed/s" },
+        { "expr": "sum(rate(sentinel_task_fenced_out_total{instance=~\"$instance\"}[1m]))", "legendFormat": "fenced out/s" }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Backpressure",
+      "description": "Rejections are the engine protecting itself and are not in themselves a fault. Sustained rejection means capacity is genuinely short.",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "expr": "sum(rate(sentinel_admission_rejected_total{instance=~\"$instance\"}[1m]))", "legendFormat": "submissions rejected/s" },
+        { "expr": "sum(sentinel_poll_waiting{instance=~\"$instance\"})", "legendFormat": "polls parked" }
+      ]
+    }
+  ]
+}
