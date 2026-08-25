@@ -1,0 +1,136 @@
+syntax = "proto3";
+
+package sentinel.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "sentinel/v1/common.proto";
+
+option java_package = "dev.sentinel.proto.v1";
+option java_multiple_files = true;
+option java_outer_classname = "TaskProto";
+
+// The worker protocol.
+//
+// Every task-scoped call carries a fencing token, and the engine authorises on that token rather
+// than on the connection. The intuitive alternative, trusting the connection because a worker
+// holding one is obviously the worker that claimed the task, is wrong in an interesting way: a
+// worker can be alive and connected while stalled long enough to lose its lease, and its socket
+// says nothing about whether the lease survived.
+service TaskService {
+
+  // Long poll for work.
+  //
+  // The engine attempts a claim, and if there is nothing it holds the request open and retries on
+  // a paced interval until either work appears or max_wait expires. An empty response is the
+  // ordinary answer to an empty queue, not an error: the waiting already happened server-side, so
+  // the worker should poll again straight away rather than sleeping on top of it.
+  //
+  // Errors: RESOURCE_EXHAUSTED with a retry hint when too many polls are already waiting,
+  // UNAVAILABLE when the engine cannot reach its database.
+  rpc PollForTasks(PollForTasksRequest) returns (PollForTasksResponse);
+
+  // Renews every lease this worker holds, in one call.
+  //
+  // Batched deliberately. Heartbeats are the highest-frequency traffic in the system, and a worker
+  // running sixteen tasks should renew sixteen leases in one round trip rather than sixteen.
+  //
+  // This RPC does not fail when a lease is lost. It reports per-lease outcomes instead, because
+  // failing the whole call would hide the fate of fifteen healthy leases behind one dead one.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+
+  // Reports success. FAILED_PRECONDITION if the worker no longer owns the task, which the client
+  // must treat as non-retryable: it is a decision someone else has already acted on.
+  rpc CompleteTask(CompleteTaskRequest) returns (ReportResponse);
+
+  // Reports failure, and lets the engine decide between another attempt and a terminal outcome.
+  rpc FailTask(FailTaskRequest) returns (ReportResponse);
+}
+
+message PollForTasksRequest {
+  // Stable identity of the worker process. Must survive a reconnect, or the engine cannot tell a
+  // returning worker from a new one.
+  string worker_id = 1;
+
+  // Routing keys this worker can execute. Empty means it can run nothing, which is answered with
+  // an empty response rather than an error.
+  repeated string task_types = 2;
+
+  // How many tasks the worker has free capacity for right now. The engine clamps this: a worker
+  // cannot usefully hold more leases than it has threads to service them with.
+  int32 batch_size = 3;
+
+  // How long the engine may hold this request open before answering with nothing. Clamped by the
+  // engine, and further bounded by the call's gRPC deadline if that is shorter.
+  google.protobuf.Duration max_wait = 4;
+
+  // Declared total capacity, recorded for operator visibility. Never used for correctness: task
+  // ownership is proven by the fencing token, never by anything in the worker registry.
+  int32 max_concurrency = 5;
+}
+
+message AssignedTask {
+  string task_id = 1;
+  string workflow_id = 2;
+  string name = 3;
+  string task_type = 4;
+  string input = 5;
+
+  // Attempts consumed including this one. A claim consumes an attempt, so a task that kills its
+  // worker without ever reporting still burns budget and eventually stops being retried.
+  int32 attempt = 6;
+  int32 max_attempts = 7;
+
+  // Proof of ownership, and the only proof. Must be echoed on every later call about this task.
+  int64 fencing_token = 8;
+
+  // When the engine stops waiting and may give this task to someone else. From the database
+  // clock, never from an engine JVM.
+  google.protobuf.Timestamp lease_expires_at = 9;
+}
+
+message PollForTasksResponse {
+  // May be empty, and may be smaller than the requested batch. Both are ordinary.
+  repeated AssignedTask tasks = 1;
+}
+
+message TaskLease {
+  string task_id = 1;
+  int64 fencing_token = 2;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  repeated TaskLease leases = 2;
+}
+
+message HeartbeatResponse {
+  // Leases that were extended.
+  repeated string renewed_task_ids = 1;
+
+  // Leases this worker no longer holds. The worker must stop executing these and must not report
+  // on them; the engine has already given them to someone else.
+  repeated string lost_task_ids = 2;
+}
+
+message CompleteTaskRequest {
+  string task_id = 1;
+  string worker_id = 2;
+  int64 fencing_token = 3;
+  // JSON document. Capped at 256 KB.
+  string output = 4;
+}
+
+message FailTaskRequest {
+  string task_id = 1;
+  string worker_id = 2;
+  int64 fencing_token = 3;
+  FailureKind kind = 4;
+  string message = 5;
+}
+
+message ReportResponse {
+  // True when this exact report had already been recorded by this same worker. That is what a
+  // response lost on the way back produces, and it is a success rather than an error.
+  bool already_recorded = 1;
+}

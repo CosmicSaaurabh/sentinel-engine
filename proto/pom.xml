@@ -15,8 +15,85 @@
     <packaging>jar</packaging>
 
     <!--
-        Placeholder for the gRPC contract module.
-        protobuf-maven-plugin and .proto sources land in T2.3, after
-        HLD-002 (transport design) and LLD-002 (SDK design) are approved.
+        The wire contract, and nothing else.
+
+        This module is deliberately shared by both the engine and the worker SDK, so it must not
+        depend on either and must not depend on Spring. The SDK's own pom forbids Spring outright,
+        and a contract module that dragged a framework in would take that choice away from every
+        consumer of the contract.
     -->
+
+    <dependencies>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-protobuf</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-stub</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.google.protobuf</groupId>
+            <artifactId>protobuf-java</artifactId>
+        </dependency>
+        <!--
+            grpc-java's generated stubs carry @javax.annotation.Generated, which is not in the JDK
+            any more. Provided scope: needed to compile the generated code, never shipped.
+        -->
+        <dependency>
+            <groupId>org.apache.tomcat</groupId>
+            <artifactId>annotations-api</artifactId>
+            <version>6.0.53</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>io.github.ascopes</groupId>
+                <artifactId>protobuf-maven-plugin</artifactId>
+                <!-- Pinned explicitly. This project does not inherit spring-boot-starter-parent,
+                     so an unpinned plugin resolves to whatever is newest, and a code generator
+                     that changes underneath a build is not a reproducible build. -->
+                <version>${protobuf-maven-plugin.version}</version>
+                <configuration>
+                    <protoc>${protobuf-java.version}</protoc>
+                    <sourceDirectories>
+                        <sourceDirectory>${project.basedir}/src/main/protobuf</sourceDirectory>
+                    </sourceDirectories>
+                    <plugins>
+                        <plugin kind="binary-maven">
+                            <groupId>io.grpc</groupId>
+                            <artifactId>protoc-gen-grpc-java</artifactId>
+                            <version>${grpc-java.version}</version>
+                        </plugin>
+                    </plugins>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>generate</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+                Generated protobuf and gRPC sources do not satisfy -Xlint:all, and they never will,
+                because we do not write them. Dropping -Werror here rather than globally keeps the
+                strict setting on every line of code this project is actually responsible for.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <release>21</release>
+                    <compilerArgs combine.self="override">
+                        <arg>-nowarn</arg>
+                    </compilerArgs>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>

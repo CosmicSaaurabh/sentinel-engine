@@ -55,7 +55,7 @@ class DiamondDagLifecycleTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("happy path: root, then both branches, then the join, then the workflow completes")
     void diamondRunsToCompletion() {
-        Workflow workflow = submissionService.submit(Workflows.diamond());
+        Workflow workflow = submissionService.submit(Workflows.diamond()).workflow();
 
         // Only root is runnable.
         List<ClaimedTask> firstPoll = claim(10);
@@ -91,7 +91,7 @@ class DiamondDagLifecycleTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("failure branch: left fails permanently, join never runs, and the workflow fails")
     void aFailedBranchStopsEverythingDownstream() {
-        Workflow workflow = submissionService.submit(Workflows.diamond());
+        Workflow workflow = submissionService.submit(Workflows.diamond()).workflow();
         completeAll(claim(10));
 
         List<ClaimedTask> branches = claim(10);
@@ -117,7 +117,7 @@ class DiamondDagLifecycleTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a sibling already running when the workflow fails is left to finish, not falsified")
     void aRunningSiblingIsLeftAlone() {
-        Workflow workflow = submissionService.submit(Workflows.diamond());
+        Workflow workflow = submissionService.submit(Workflows.diamond()).workflow();
         completeAll(claim(10));
         List<ClaimedTask> branches = claim(10);
         ClaimedTask left = named(branches, "left");
@@ -148,7 +148,7 @@ class DiamondDagLifecycleTest extends AbstractIntegrationTest {
                         dev.sentinel.engine.domain.TaskDefinition.of("left", Workflows.TASK_TYPE, "root"),
                         dev.sentinel.engine.domain.TaskDefinition.of("right", Workflows.TASK_TYPE, "root"),
                         dev.sentinel.engine.domain.TaskDefinition.of("join", Workflows.TASK_TYPE, "left", "right"),
-                        dev.sentinel.engine.domain.TaskDefinition.of("bystander", "other.routing.key"))));
+                        dev.sentinel.engine.domain.TaskDefinition.of("bystander", "other.routing.key")))).workflow();
         completeAll(claim(10));
         ClaimedTask left = named(claim(10), "left");
 
@@ -169,7 +169,7 @@ class DiamondDagLifecycleTest extends AbstractIntegrationTest {
     @Test
     @DisplayName("a retryable failure in a branch leaves the workflow running")
     void aRetryableBranchFailureDoesNotFailTheWorkflow() {
-        Workflow workflow = submissionService.submit(Workflows.diamond());
+        Workflow workflow = submissionService.submit(Workflows.diamond()).workflow();
         completeAll(claim(10));
         ClaimedTask left = named(claim(10), "left");
 

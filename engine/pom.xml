@@ -16,12 +16,35 @@
 
     <dependencies>
         <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-webmvc</artifactId>
+            <groupId>dev.sentinel</groupId>
+            <artifactId>proto</artifactId>
+            <version>${project.version}</version>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jdbc</artifactId>
+            <artifactId>spring-boot-starter-grpc-server</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+        <!--
+            spring-boot-starter-jdbc, deliberately not spring-boot-starter-data-jdbc.
+
+            The Data variant adds Spring Data JDBC, which can derive SQL from repository method
+            names. This project writes every statement by hand, because the queries that matter
+            here cannot be generated and must not be hidden: the claim is a CTE with
+            FOR UPDATE SKIP LOCKED that selects and updates in one statement, and every state
+            change is a guarded UPDATE whose WHERE clause restates its precondition and whose
+            affected-row count is asserted. A generated save() hides both, and hiding them is how
+            a fencing check gets quietly dropped in a refactor.
+
+            Depending on the narrower starter keeps the pom honest: it stops advertising a
+            capability the project has decided not to use, so nobody reaches for it by accident.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -60,12 +83,27 @@
 
         <dependency>
             <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-grpc-server-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            In-process transport for the lifecycle test. It exercises the real generated stubs,
+            the real interceptors and the real service implementations, but skips the socket, so
+            the test cannot fail because of a port collision on a busy CI machine.
+        -->
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-inprocess</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-jdbc-test</artifactId>
+            <artifactId>spring-boot-starter-jdbc-test</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>

@@ -251,6 +251,58 @@ public class TaskRepository {
         return GuardedUpdate.applied(rows, "renewLease", taskId);
     }
 
+    /**
+     * Renews several leases held by one worker, in a single statement.
+     *
+     * <p>A worker running sixteen tasks renews sixteen leases in one round trip rather than
+     * sixteen. Heartbeats are the highest-frequency traffic in the system, and each one otherwise
+     * costs a whole round trip to update a single timestamp.
+     *
+     * <p>Like the single-lease version, this writes only {@code lease_expires_at}, which is indexed
+     * nowhere, so the update stays eligible to be a HOT update and does no index maintenance.
+     *
+     * @return the ids actually renewed. Anything the caller asked about and does not get back has
+     *         been lost to another worker, and the caller must be told which is which rather than
+     *         having the whole call fail because of one dead lease
+     */
+    public List<UUID> renewLeases(String workerId, Map<UUID, Long> fencingTokensByTaskId, Duration leaseDuration) {
+        if (fencingTokensByTaskId.isEmpty()) {
+            return List.of();
+        }
+
+        StringBuilder values = new StringBuilder();
+        Map<String, Object> params = new HashMap<>();
+        params.put("workerId", workerId);
+        params.put("leaseSeconds", leaseDuration.toSeconds());
+
+        int index = 0;
+        for (Map.Entry<UUID, Long> lease : fencingTokensByTaskId.entrySet()) {
+            if (index > 0) {
+                values.append(", ");
+            }
+            values.append("(CAST(:taskId").append(index).append(" AS uuid), CAST(:fence")
+                    .append(index).append(" AS bigint))");
+            params.put("taskId" + index, lease.getKey());
+            params.put("fence" + index, lease.getValue());
+            index++;
+        }
+
+        return jdbcClient.sql("""
+                UPDATE tasks t
+                   SET lease_expires_at = now() + (interval '1 second' * :leaseSeconds),
+                       updated_at = now()
+                  FROM (VALUES %s) AS requested(task_id, fencing_token)
+                 WHERE t.id = requested.task_id
+                   AND t.status = 'RUNNING'
+                   AND t.owner_worker_id = :workerId
+                   AND t.fencing_token = requested.fencing_token
+                RETURNING t.id
+                """.formatted(values))
+                .params(params)
+                .query((rs, rowNum) -> rs.getObject("id", UUID.class))
+                .list();
+    }
+
     /** Records success. Clears the lease, which the {@code tasks_lease_consistency} check requires. */
     public boolean markCompleted(UUID taskId, String workerId, long fencingToken, String output) {
         int rows = jdbcClient.sql("""

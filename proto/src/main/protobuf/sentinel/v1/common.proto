@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package sentinel.v1;
+
+option java_package = "dev.sentinel.proto.v1";
+option java_multiple_files = true;
+option java_outer_classname = "CommonProto";
+
+// Shared enums.
+//
+// Every enum here starts at an explicit UNSPECIFIED zero value, and that is not a stylistic
+// convention. proto3 has no field presence for enums: an unset field arrives as zero. If zero
+// were a real value, a client that forgot to set the field would silently be understood to mean
+// that value, and the mistake would be invisible on both sides. Reserving zero for "nobody said"
+// turns that into an explicit, rejectable case.
+
+// Lifecycle of a task instance. Mirrors dev.sentinel.engine.domain.TaskStatus.
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  // Waiting on at least one parent task.
+  TASK_STATUS_BLOCKED = 1;
+  // Claimable now, or at its next attempt time.
+  TASK_STATUS_PENDING = 2;
+  // Held by a worker under a lease.
+  TASK_STATUS_RUNNING = 3;
+  TASK_STATUS_COMPLETED = 4;
+  TASK_STATUS_FAILED = 5;
+  // Never ran and never will, because an ancestor failed or the workflow did.
+  TASK_STATUS_CANCELLED = 6;
+}
+
+// Lifecycle of a workflow execution. There is deliberately no PENDING: a workflow scheduled for
+// the future is RUNNING from submission, and the delay lives on its root tasks.
+enum WorkflowStatus {
+  WORKFLOW_STATUS_UNSPECIFIED = 0;
+  WORKFLOW_STATUS_RUNNING = 1;
+  WORKFLOW_STATUS_COMPLETED = 2;
+  WORKFLOW_STATUS_FAILED = 3;
+}
+
+// Whether a failure is worth repeating.
+enum FailureKind {
+  FAILURE_KIND_UNSPECIFIED = 0;
+  // Transient: timeout, connection reset, downstream 5xx. Retried with backoff.
+  FAILURE_KIND_RETRYABLE = 1;
+  // Deterministic: validation error, downstream rejection. Goes terminal after one attempt,
+  // because spending the whole attempt budget to reach the same answer wastes worker capacity
+  // and delays the terminal state a caller is waiting on.
+  FAILURE_KIND_PERMANENT = 2;
+}

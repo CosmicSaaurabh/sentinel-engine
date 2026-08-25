@@ -1,0 +1,11 @@
+{
+  "recommendations": [
+    "vscjava.vscode-java-pack",
+    "k--kato.intellij-idea-keybindings",
+    "vmware.vscode-spring-boot",
+    "vscjava.vscode-spring-boot-dashboard",
+    "vscjava.vscode-spring-initializr",
+    "redhat.vscode-xml",
+    "zxh404.vscode-proto3"
+  ]
+}
