@@ -54,9 +54,14 @@ public final class DagValidator {
 
     private final int maxTasks;
     private final int maxEdges;
-    private final int defaultMaxAttempts;
+    private final java.util.function.ToIntFunction<String> defaultMaxAttempts;
 
-    public DagValidator(int maxTasks, int maxEdges, int defaultMaxAttempts) {
+    /**
+     * @param defaultMaxAttempts attempt budget for a task type that did not specify its own.
+     *        Resolved here, at submission, and then stored on the row, so that a later
+     *        configuration change cannot retroactively exhaust a task already in flight
+     */
+    public DagValidator(int maxTasks, int maxEdges, java.util.function.ToIntFunction<String> defaultMaxAttempts) {
         this.maxTasks = maxTasks;
         this.maxEdges = maxEdges;
         this.defaultMaxAttempts = defaultMaxAttempts;
@@ -214,7 +219,9 @@ public final class DagValidator {
         List<NewTask> tasks = new ArrayList<>(definition.tasks().size());
         for (TaskDefinition task : definition.tasks()) {
             int parents = parentCounts.getOrDefault(task.name(), 0);
-            int maxAttempts = task.maxAttempts() == null ? defaultMaxAttempts : task.maxAttempts();
+            int maxAttempts = task.maxAttempts() == null
+                    ? defaultMaxAttempts.applyAsInt(task.taskType())
+                    : task.maxAttempts();
 
             // A trigger time delays the tasks that would otherwise start immediately. Applying it
             // to blocked tasks would be meaningless: they are already waiting on their parents,

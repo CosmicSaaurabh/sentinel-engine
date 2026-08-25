@@ -280,7 +280,8 @@ public class TaskGrpcService extends TaskServiceGrpc.TaskServiceImplBase {
                 request.getWorkerId(),
                 request.getFencingToken(),
                 ProtoMappers.toFailureKind(request.getKind()),
-                request.getMessage());
+                request.getMessage(),
+                request.hasErrorClass() ? request.getErrorClass() : null);
 
         observer.onNext(toReportResponse(outcome));
         observer.onCompleted();

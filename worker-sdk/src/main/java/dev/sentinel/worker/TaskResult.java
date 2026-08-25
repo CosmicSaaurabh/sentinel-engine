@@ -33,12 +33,23 @@ public sealed interface TaskResult {
 
     /** The task failed in a way that may succeed on a later attempt. */
     static TaskResult failed(String message) {
-        return new Failed(message, false);
+        return new Failed(message, false, null);
     }
 
     /** The task failed in a way no retry can fix. */
     static TaskResult permanentlyFailed(String message) {
-        return new Failed(message, true);
+        return new Failed(message, true, null);
+    }
+
+    /**
+     * Built by the SDK when a handler throws, so the exception type is reported as its own field.
+     *
+     * <p>Keeping the class out of the message means "how often does this task type throw
+     * SocketTimeoutException" is a query rather than a text search, which is the difference between
+     * noticing a pattern and never noticing it.
+     */
+    static TaskResult fromException(Throwable thrown) {
+        return new Failed(thrown.getMessage(), false, thrown.getClass().getName());
     }
 
     /**
@@ -60,8 +71,9 @@ public sealed interface TaskResult {
      * @param message operator-facing detail, recorded against the task and visible when querying
      *        the workflow
      * @param permanent whether the engine should stop retrying immediately
+     * @param errorClass the exception type when this came from a throw, otherwise null
      */
-    record Failed(String message, boolean permanent) implements TaskResult {
+    record Failed(String message, boolean permanent, String errorClass) implements TaskResult {
 
         public Failed {
             message = message == null ? "" : message;

@@ -127,6 +127,12 @@ message FailTaskRequest {
   int64 fencing_token = 3;
   FailureKind kind = 4;
   string message = 5;
+
+  // Exception class, when the failure came from a thrown exception rather than a returned result.
+  // Kept separate from the message so that "how often does this task type throw
+  // SocketTimeoutException" is a query rather than a text search. Added at tag 6 rather than by
+  // repurposing an existing tag, which is the rule that keeps v1 wire-compatible.
+  optional string error_class = 6;
 }
 
 message ReportResponse {

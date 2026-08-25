@@ -62,7 +62,6 @@ sentinel:
     # latency spike nobody can attribute.
     max-tasks: 1000
     max-edges: 10000
-    default-max-attempts: 10
   admission:
     enabled: true
     # Tasks in flight across the fleet before new workflows are refused outright. Refusing is the
@@ -91,6 +90,20 @@ sentinel:
     # knock the recovering downstream service back down.
     base-delay: 2s
     max-delay: 5m
+    # Resolved at submission and stored on the task row, so changing it here cannot retroactively
+    # exhaust a task that is already in flight.
+    max-attempts: 10
+    # Per-task-type overrides. Anything absent uses the values above. Every field is optional, so
+    # naming a type to change its budget does not silently reset its delays.
+    #
+    # policies:
+    #   billing.charge:       # rate-limited payment API: back off hard, give up early
+    #     base-delay: 10s
+    #     max-delay: 15m
+    #     max-attempts: 5
+    #   report.render:        # cheap and idempotent: retry fast, try often
+    #     base-delay: 500ms
+    #     max-attempts: 20
   claim:
     # Lease is three heartbeat intervals, which is what NFR4's recovery bound is expressed in.
     # A worker may miss two heartbeats to a network blip without losing work it is still doing.

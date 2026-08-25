@@ -72,7 +72,11 @@ class SentinelWorkerTest {
         }
 
         assertThat(invocations.get()).isEqualTo(2);
-        assertThat(engine.failures.getFirst().message()).contains("IllegalStateException").contains("boom");
+        assertThat(engine.failures.getFirst().errorClass())
+                .as("the exception type is its own field, so counting a failure mode is a query "
+                        + "rather than a text search")
+                .isEqualTo("java.lang.IllegalStateException");
+        assertThat(engine.failures.getFirst().message()).isEqualTo("boom");
         assertThat(engine.failures.getFirst().permanent())
                 .as("an unexpected exception might not recur, so it is retryable")
                 .isFalse();

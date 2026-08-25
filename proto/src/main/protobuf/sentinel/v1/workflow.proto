@@ -21,6 +21,17 @@ service WorkflowService {
 
   // Current state of a workflow and all of its tasks. NOT_FOUND for an unknown id.
   rpc GetWorkflowStatus(GetWorkflowStatusRequest) returns (GetWorkflowStatusResponse);
+
+  // Why a task failed, one entry per attempt, oldest first.
+  //
+  // Separate from GetWorkflowStatus rather than embedded in it, because the status of a healthy
+  // workflow is asked for constantly and its failure history is asked for rarely. Attaching the
+  // chain to every status response would make the common call carry data almost no caller wants.
+  rpc GetTaskFailures(GetTaskFailuresRequest) returns (GetTaskFailuresResponse);
+
+  // Tasks that have failed terminally, newest first. The operator's starting point for "what is
+  // broken", scoped to one workflow or across all of them.
+  rpc ListDeadLetterTasks(ListDeadLetterTasksRequest) returns (ListDeadLetterTasksResponse);
 }
 
 message TaskDefinition {
@@ -89,4 +100,59 @@ message GetWorkflowStatusResponse {
   optional google.protobuf.Timestamp started_at = 5;
   optional google.protobuf.Timestamp finished_at = 6;
   repeated TaskSummary tasks = 7;
+}
+
+// How a failure came to be known.
+//
+// Wider than FailureKind by exactly one value, and that value carries most of the diagnostic
+// weight: a reported failure says something about the task, while a lapsed lease says something
+// about the worker or the network, because nobody was there to report at all.
+enum FailureRecordKind {
+  FAILURE_RECORD_KIND_UNSPECIFIED = 0;
+  FAILURE_RECORD_KIND_RETRYABLE = 1;
+  FAILURE_RECORD_KIND_PERMANENT = 2;
+  FAILURE_RECORD_KIND_LEASE_EXPIRED = 3;
+}
+
+message GetTaskFailuresRequest {
+  string task_id = 1;
+}
+
+message TaskFailureRecord {
+  int32 attempt = 1;
+  // Who was running it. Absent only when the engine never knew.
+  optional string worker_id = 2;
+  FailureRecordKind kind = 3;
+  optional string error_class = 4;
+  string error_message = 5;
+  google.protobuf.Timestamp failed_at = 6;
+}
+
+message GetTaskFailuresResponse {
+  string task_id = 1;
+  repeated TaskFailureRecord failures = 2;
+}
+
+message ListDeadLetterTasksRequest {
+  // Absent means across every workflow.
+  optional string workflow_id = 1;
+  int32 limit = 2;
+}
+
+message DeadLetterTask {
+  string task_id = 1;
+  string workflow_id = 2;
+  string workflow_name = 3;
+  string task_name = 4;
+  string task_type = 5;
+  int32 attempt = 6;
+  int32 max_attempts = 7;
+  optional string last_error = 8;
+  optional FailureKind last_error_kind = 9;
+  google.protobuf.Timestamp failed_at = 10;
+  int32 recorded_failures = 11;
+}
+
+message ListDeadLetterTasksResponse {
+  repeated DeadLetterTask tasks = 1;
 }

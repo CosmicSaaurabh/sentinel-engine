@@ -4,9 +4,14 @@ import dev.sentinel.engine.domain.Workflow;
 import dev.sentinel.engine.domain.WorkflowDefinition;
 import dev.sentinel.engine.error.PayloadTooLargeException;
 import dev.sentinel.engine.infra.GrpcProperties;
+import dev.sentinel.engine.service.FailureQueryService;
 import dev.sentinel.engine.service.WorkflowQueryService;
 import dev.sentinel.engine.service.WorkflowSubmissionService;
+import dev.sentinel.proto.v1.GetTaskFailuresRequest;
+import dev.sentinel.proto.v1.GetTaskFailuresResponse;
 import dev.sentinel.proto.v1.GetWorkflowStatusRequest;
+import dev.sentinel.proto.v1.ListDeadLetterTasksRequest;
+import dev.sentinel.proto.v1.ListDeadLetterTasksResponse;
 import dev.sentinel.proto.v1.GetWorkflowStatusResponse;
 import dev.sentinel.proto.v1.SubmitWorkflowRequest;
 import dev.sentinel.proto.v1.SubmitWorkflowResponse;
@@ -32,14 +37,17 @@ public class WorkflowGrpcService extends WorkflowServiceGrpc.WorkflowServiceImpl
 
     private final WorkflowSubmissionService submissionService;
     private final WorkflowQueryService queryService;
+    private final FailureQueryService failureQueryService;
     private final GrpcProperties properties;
 
     public WorkflowGrpcService(
             WorkflowSubmissionService submissionService,
             WorkflowQueryService queryService,
+            FailureQueryService failureQueryService,
             GrpcProperties properties) {
         this.submissionService = submissionService;
         this.queryService = queryService;
+        this.failureQueryService = failureQueryService;
         this.properties = properties;
     }
 
@@ -68,6 +76,39 @@ public class WorkflowGrpcService extends WorkflowServiceGrpc.WorkflowServiceImpl
         WorkflowQueryService.WorkflowView view = queryService.findById(workflowId);
 
         observer.onNext(ProtoMappers.toStatusResponse(view.workflow(), view.tasks()));
+        observer.onCompleted();
+    }
+
+    @Override
+    public void getTaskFailures(
+            GetTaskFailuresRequest request, StreamObserver<GetTaskFailuresResponse> observer) {
+
+        UUID taskId = ProtoMappers.toUuid(request.getTaskId(), "task_id");
+
+        GetTaskFailuresResponse.Builder response = GetTaskFailuresResponse.newBuilder()
+                .setTaskId(taskId.toString());
+        failureQueryService.failuresOf(taskId).stream()
+                .map(ProtoMappers::toFailureRecord)
+                .forEach(response::addFailures);
+
+        observer.onNext(response.build());
+        observer.onCompleted();
+    }
+
+    @Override
+    public void listDeadLetterTasks(
+            ListDeadLetterTasksRequest request, StreamObserver<ListDeadLetterTasksResponse> observer) {
+
+        java.util.Optional<UUID> workflowId = request.hasWorkflowId()
+                ? java.util.Optional.of(ProtoMappers.toUuid(request.getWorkflowId(), "workflow_id"))
+                : java.util.Optional.empty();
+
+        ListDeadLetterTasksResponse.Builder response = ListDeadLetterTasksResponse.newBuilder();
+        failureQueryService.deadLetters(workflowId, request.getLimit()).stream()
+                .map(ProtoMappers::toDeadLetterTask)
+                .forEach(response::addTasks);
+
+        observer.onNext(response.build());
         observer.onCompleted();
     }
 
