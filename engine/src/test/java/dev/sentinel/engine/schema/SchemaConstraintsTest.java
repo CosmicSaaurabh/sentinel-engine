@@ -35,12 +35,23 @@ class SchemaConstraintsTest extends AbstractIntegrationTest {
     private WorkflowRepository workflows;
 
     @Test
-    @DisplayName("both migrations applied successfully")
-    void migrationsApplied() {
+    @DisplayName("every migration on the classpath has been applied, and none failed")
+    void everyMigrationApplied() throws Exception {
+        // Counting the scripts rather than hard-coding a number. An exact count is a maintenance
+        // tax that has to be paid on every migration and tells you nothing the count of files does
+        // not, and the version it fails on is never the one that broke anything.
+        int scriptsOnClasspath = new org.springframework.core.io.support.PathMatchingResourcePatternResolver()
+                .getResources("classpath:db/migration/V*.sql").length;
+
         Integer applied = jdbcClient.sql("SELECT count(*) FROM flyway_schema_history WHERE success = true")
                 .query(Integer.class)
                 .single();
-        assertThat(applied).isEqualTo(2);
+        Integer failed = jdbcClient.sql("SELECT count(*) FROM flyway_schema_history WHERE success = false")
+                .query(Integer.class)
+                .single();
+
+        assertThat(applied).isEqualTo(scriptsOnClasspath);
+        assertThat(failed).isZero();
     }
 
     @Test

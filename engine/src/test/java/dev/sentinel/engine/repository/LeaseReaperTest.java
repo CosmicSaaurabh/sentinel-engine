@@ -36,9 +36,14 @@ class LeaseReaperTest extends AbstractIntegrationTest {
         ClaimedTask claimed = claimOne(10);
         expireLease(claimed.id());
 
-        List<UUID> requeued = tasks.requeueExpiredLeases(100, Duration.ZERO);
+        List<TaskRepository.ExpiredLease> requeued = tasks.requeueExpiredLeases(100, Duration.ZERO);
 
-        assertThat(requeued).containsExactly(claimed.id());
+        assertThat(requeued).extracting(TaskRepository.ExpiredLease::taskId).containsExactly(claimed.id());
+        assertThat(requeued.getFirst().ownerWorkerId())
+                .as("who was holding the lease is the detail that turns \"a task was reaped\" into "
+                        + "\"this worker stopped reporting\", and it is gone from the row once released")
+                .isEqualTo("worker-1");
+        assertThat(requeued.getFirst().attempt()).isEqualTo(1);
         Task stored = tasks.findById(claimed.id()).orElseThrow();
         assertThat(stored.status()).isEqualTo(TaskStatus.PENDING);
         assertThat(stored.lease()).isNull();
@@ -77,7 +82,9 @@ class LeaseReaperTest extends AbstractIntegrationTest {
         assertThat(tasks.requeueExpiredLeases(100, Duration.ZERO))
                 .as("re-queueing would let a task that kills its worker consume the fleet forever")
                 .isEmpty();
-        assertThat(tasks.failExhaustedExpiredLeases(100)).containsExactly(claimed.id());
+        assertThat(tasks.failExhaustedExpiredLeases(100))
+                .extracting(TaskRepository.ExpiredLease::taskId)
+                .containsExactly(claimed.id());
         assertThat(tasks.findById(claimed.id()).orElseThrow().status()).isEqualTo(TaskStatus.FAILED);
     }
 
@@ -96,6 +103,28 @@ class LeaseReaperTest extends AbstractIntegrationTest {
         assertThat(tasks.requeueExpiredLeases(2, Duration.ZERO)).hasSize(2);
         assertThat(tasks.requeueExpiredLeases(2, Duration.ZERO)).hasSize(2);
         assertThat(tasks.requeueExpiredLeases(2, Duration.ZERO)).isEmpty();
+    }
+
+    @Test
+    @DisplayName("the re-queue delay is jittered per task, so a recovered batch does not stampede")
+    void requeueDelayIsJitteredPerTask() {
+        UUID workflowId = workflows.insert(NewWorkflow.immediate("stampede")).id();
+        tasks.insertAll(workflowId, java.util.stream.IntStream.range(0, 20)
+                .mapToObj(i -> NewTask.runnable("task-" + i, DagFixtures.TASK_TYPE, "{}"))
+                .toList());
+        tasks.claimBatch("worker-1", List.of(DagFixtures.TASK_TYPE), 20, LEASE)
+                .forEach(claimed -> expireLease(claimed.id()));
+
+        tasks.requeueExpiredLeases(50, Duration.ofMinutes(10));
+
+        long distinctTimes = jdbcClient.sql(
+                "SELECT count(DISTINCT next_attempt_at) FROM tasks WHERE workflow_id = :id")
+                .param("id", workflowId)
+                .query(Long.class)
+                .single();
+        assertThat(distinctTimes)
+                .as("one delay for the whole batch would just move the stampede ten minutes later")
+                .isGreaterThan(15);
     }
 
     @Test

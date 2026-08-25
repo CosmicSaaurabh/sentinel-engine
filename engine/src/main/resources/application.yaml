@@ -71,6 +71,20 @@ sentinel:
     total-slots: 10000
     # Jittered before it is sent, so a rejected fleet does not return in one synchronised wave.
     retry-after: 5s
+  reaper:
+    enabled: true
+    # Detection latency is dominated by the lease duration, so this only has to be comfortably
+    # below it. Running it faster buys almost nothing.
+    interval: 5s
+    # Every instance starts its reaper at roughly the same moment after a deployment, so without
+    # jitter they would reap in lockstep forever after and mostly find each other's leftovers.
+    jitter: 0.4
+    # Bounds the transaction size and lock footprint, which is what stops a mass expiry from
+    # becoming one enormous transaction that blocks every claimer.
+    batch-size: 200
+    # Jittered per task inside the SQL. A single delay for a whole batch would remove the lock
+    # contention and then recreate the stampede one step later.
+    requeue-delay: 5s
   retry:
     # Exponential with full jitter: 2s, 4s, 8s ... capped. Jitter is not decoration. Failures are
     # correlated, so a deterministic schedule makes a thousand tasks retry on the same instant and

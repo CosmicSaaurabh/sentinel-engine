@@ -16,13 +16,17 @@ class EngineApplicationTests extends AbstractIntegrationTest {
     private DatabaseClock databaseClock;
 
     @Test
-    @DisplayName("every migration applies against a real Postgres")
+    @DisplayName("no migration failed against a real Postgres")
     void migrationsApplyAgainstRealPostgres() {
+        Integer failed = jdbcClient.sql("SELECT count(*) FROM flyway_schema_history WHERE success = false")
+                .query(Integer.class)
+                .single();
         Integer applied = jdbcClient.sql("SELECT count(*) FROM flyway_schema_history WHERE success = true")
                 .query(Integer.class)
                 .single();
 
-        assertThat(applied).isEqualTo(2);
+        assertThat(failed).isZero();
+        assertThat(applied).isPositive();
     }
 
     @Test
