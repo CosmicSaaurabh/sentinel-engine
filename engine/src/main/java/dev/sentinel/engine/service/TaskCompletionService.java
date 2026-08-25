@@ -2,7 +2,9 @@ package dev.sentinel.engine.service;
 
 import dev.sentinel.engine.domain.FailureKind;
 import dev.sentinel.engine.domain.OutboxEventType;
+import dev.sentinel.engine.domain.RecordedFailure;
 import dev.sentinel.engine.domain.RetryPolicy;
+import dev.sentinel.engine.domain.RetryPolicyResolver;
 import dev.sentinel.engine.domain.Task;
 import dev.sentinel.engine.domain.TaskFailure;
 import dev.sentinel.engine.domain.TaskStatus;
@@ -12,6 +14,7 @@ import dev.sentinel.engine.infra.ClaimProperties;
 import dev.sentinel.engine.repository.CapacityCounterRepository;
 import dev.sentinel.engine.repository.OutboxRepository;
 import dev.sentinel.engine.repository.TaskDependencyRepository;
+import dev.sentinel.engine.repository.TaskFailureRepository;
 import dev.sentinel.engine.repository.TaskRepository;
 import dev.sentinel.engine.repository.WorkflowRepository;
 import io.micrometer.core.instrument.Counter;
@@ -56,7 +59,8 @@ public class TaskCompletionService {
     private final WorkflowRepository workflows;
     private final OutboxRepository outbox;
     private final CapacityCounterRepository capacity;
-    private final RetryPolicy retryPolicy;
+    private final RetryPolicyResolver retryPolicies;
+    private final TaskFailureRepository failures;
     private final ClaimProperties claimProperties;
     private final TransactionTemplate transactionTemplate;
 
@@ -73,7 +77,8 @@ public class TaskCompletionService {
             WorkflowRepository workflows,
             OutboxRepository outbox,
             CapacityCounterRepository capacity,
-            RetryPolicy retryPolicy,
+            RetryPolicyResolver retryPolicies,
+            TaskFailureRepository failures,
             ClaimProperties claimProperties,
             TransactionTemplate transactionTemplate,
             MeterRegistry meterRegistry) {
@@ -82,7 +87,8 @@ public class TaskCompletionService {
         this.workflows = workflows;
         this.outbox = outbox;
         this.capacity = capacity;
-        this.retryPolicy = retryPolicy;
+        this.retryPolicies = retryPolicies;
+        this.failures = failures;
         this.claimProperties = claimProperties;
         this.transactionTemplate = transactionTemplate;
         this.completed = Counter.builder("sentinel.task.completed").register(meterRegistry);
@@ -212,23 +218,47 @@ public class TaskCompletionService {
      */
     public CompletionOutcome fail(
             UUID taskId, String workerId, long fencingToken, FailureKind kind, String message) {
+        return fail(taskId, workerId, fencingToken, kind, message, null);
+    }
+
+    /**
+     * @param errorClass the exception type, when the failure came from a thrown exception. Kept
+     *        apart from the message so that "how often does this task type throw
+     *        SocketTimeoutException" is a query rather than a text search
+     */
+    public CompletionOutcome fail(
+            UUID taskId, String workerId, long fencingToken, FailureKind kind, String message,
+            String errorClass) {
 
         TaskFailure failure = new TaskFailure(message, kind);
 
         return transactionTemplate.execute(status -> {
             Task task = tasks.findById(taskId).orElseThrow(() -> EntityNotFoundException.task(taskId));
 
-            boolean retry = retryPolicy.shouldRetry(task.attempt(), task.maxAttempts(), kind);
-            return retry
-                    ? scheduleRetry(task, workerId, fencingToken, failure)
+            RetryPolicy policy = retryPolicies.forTaskType(task.taskType());
+            boolean retry = policy.shouldRetry(task.attempt(), task.maxAttempts(), kind);
+
+            CompletionOutcome outcome = retry
+                    ? scheduleRetry(task, workerId, fencingToken, failure, policy)
                     : failTerminally(task, workerId, fencingToken, failure);
+
+            // Recorded only when the report actually changed something. A duplicate report of an
+            // already-recorded failure must not append a second row for the same attempt, and a
+            // report from a fenced-out worker never reaches here at all.
+            if (outcome == CompletionOutcome.RECORDED) {
+                failures.record(new RecordedFailure(
+                        task.id(), task.workflowId(), task.attempt(), workerId,
+                        dev.sentinel.engine.domain.FailureRecordKind.of(kind),
+                        errorClass, failure.message(), null));
+            }
+            return outcome;
         });
     }
 
     private CompletionOutcome scheduleRetry(
-            Task task, String workerId, long fencingToken, TaskFailure failure) {
+            Task task, String workerId, long fencingToken, TaskFailure failure, RetryPolicy policy) {
 
-        Duration delay = retryPolicy.delayBefore(task.attempt(), failure.kind());
+        Duration delay = policy.delayBefore(task.attempt(), failure.kind());
         if (!tasks.scheduleRetry(task.id(), workerId, fencingToken, failure, delay)) {
             return classifyRejection(task.id(), workerId, fencingToken, TaskStatus.PENDING);
         }

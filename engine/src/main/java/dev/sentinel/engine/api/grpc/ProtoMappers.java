@@ -165,6 +165,63 @@ public final class ProtoMappers {
         };
     }
 
+    public static dev.sentinel.proto.v1.TaskFailureRecord toFailureRecord(
+            dev.sentinel.engine.domain.RecordedFailure failure) {
+
+        dev.sentinel.proto.v1.TaskFailureRecord.Builder record =
+                dev.sentinel.proto.v1.TaskFailureRecord.newBuilder()
+                        .setAttempt(failure.attempt())
+                        .setKind(toProtoFailureRecordKind(failure.kind()))
+                        .setErrorMessage(failure.errorMessage());
+
+        if (failure.workerId() != null) {
+            record.setWorkerId(failure.workerId());
+        }
+        if (failure.errorClass() != null) {
+            record.setErrorClass(failure.errorClass());
+        }
+        if (failure.failedAt() != null) {
+            record.setFailedAt(toTimestamp(failure.failedAt()));
+        }
+        return record.build();
+    }
+
+    public static dev.sentinel.proto.v1.DeadLetterTask toDeadLetterTask(
+            dev.sentinel.engine.repository.DeadLetterRepository.DeadLetterTask task) {
+
+        dev.sentinel.proto.v1.DeadLetterTask.Builder builder =
+                dev.sentinel.proto.v1.DeadLetterTask.newBuilder()
+                        .setTaskId(task.taskId().toString())
+                        .setWorkflowId(task.workflowId().toString())
+                        .setWorkflowName(task.workflowName())
+                        .setTaskName(task.taskName())
+                        .setTaskType(task.taskType())
+                        .setAttempt(task.attempt())
+                        .setMaxAttempts(task.maxAttempts())
+                        .setRecordedFailures(task.recordedFailures());
+
+        if (task.lastError() != null) {
+            builder.setLastError(task.lastError());
+        }
+        if (task.lastErrorKind() != null) {
+            builder.setLastErrorKind(toProtoFailureKind(task.lastErrorKind()));
+        }
+        if (task.failedAt() != null) {
+            builder.setFailedAt(toTimestamp(task.failedAt()));
+        }
+        return builder.build();
+    }
+
+    private static dev.sentinel.proto.v1.FailureRecordKind toProtoFailureRecordKind(
+            dev.sentinel.engine.domain.FailureRecordKind kind) {
+        return switch (kind) {
+            case RETRYABLE -> dev.sentinel.proto.v1.FailureRecordKind.FAILURE_RECORD_KIND_RETRYABLE;
+            case PERMANENT -> dev.sentinel.proto.v1.FailureRecordKind.FAILURE_RECORD_KIND_PERMANENT;
+            case LEASE_EXPIRED ->
+                    dev.sentinel.proto.v1.FailureRecordKind.FAILURE_RECORD_KIND_LEASE_EXPIRED;
+        };
+    }
+
     public static Timestamp toTimestamp(Instant instant) {
         return Timestamp.newBuilder()
                 .setSeconds(instant.getEpochSecond())

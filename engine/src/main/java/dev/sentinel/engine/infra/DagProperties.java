@@ -11,15 +11,18 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * unbounded SQL text to parse. A rejected oversized submission is a clear error; an accepted one is
  * a latency spike that nobody can attribute.
  *
+ * <p>The default attempt budget deliberately does not live here. It moved to
+ * {@code sentinel.retry.max-attempts} when retry became configurable per task type, because two
+ * places to set the same number is a trap: whichever one an operator edits, the other looks like it
+ * should have worked.
+ *
  * @param maxTasks tasks per workflow
  * @param maxEdges dependency edges per workflow
- * @param defaultMaxAttempts used when a task does not specify its own
  */
 @ConfigurationProperties("sentinel.dag")
 public record DagProperties(
         @DefaultValue("1000") int maxTasks,
-        @DefaultValue("10000") int maxEdges,
-        @DefaultValue("10") int defaultMaxAttempts) {
+        @DefaultValue("10000") int maxEdges) {
 
     public DagProperties {
         if (maxTasks < 1) {
@@ -27,9 +30,6 @@ public record DagProperties(
         }
         if (maxEdges < 0) {
             throw new IllegalArgumentException("sentinel.dag.max-edges must not be negative");
-        }
-        if (defaultMaxAttempts < 1) {
-            throw new IllegalArgumentException("sentinel.dag.default-max-attempts must be at least 1");
         }
     }
 }

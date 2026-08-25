@@ -43,8 +43,11 @@ interface EngineClient extends AutoCloseable {
      */
     void complete(UUID taskId, long fencingToken, String output);
 
-    /** @throws LeaseLostException as above */
-    void fail(UUID taskId, long fencingToken, String message, boolean permanent);
+    /**
+     * @param errorClass the exception type, when the failure came from a throw. Null otherwise
+     * @throws LeaseLostException as above
+     */
+    void fail(UUID taskId, long fencingToken, String message, boolean permanent, String errorClass);
 
     @Override
     void close();

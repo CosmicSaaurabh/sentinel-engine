@@ -118,18 +118,21 @@ final class GrpcEngineClient implements EngineClient {
     }
 
     @Override
-    public void fail(UUID taskId, long fencingToken, String message, boolean permanent) {
+    public void fail(UUID taskId, long fencingToken, String message, boolean permanent, String errorClass) {
+        FailTaskRequest.Builder request = FailTaskRequest.newBuilder()
+                .setTaskId(taskId.toString())
+                .setWorkerId(workerId)
+                .setFencingToken(fencingToken)
+                .setKind(permanent
+                        ? FailureKind.FAILURE_KIND_PERMANENT
+                        : FailureKind.FAILURE_KIND_RETRYABLE)
+                .setMessage(message);
+        if (errorClass != null) {
+            request.setErrorClass(errorClass);
+        }
         try {
             stub.withDeadlineAfter(REPORT_DEADLINE.toMillis(), TimeUnit.MILLISECONDS)
-                    .failTask(FailTaskRequest.newBuilder()
-                            .setTaskId(taskId.toString())
-                            .setWorkerId(workerId)
-                            .setFencingToken(fencingToken)
-                            .setKind(permanent
-                                    ? FailureKind.FAILURE_KIND_PERMANENT
-                                    : FailureKind.FAILURE_KIND_RETRYABLE)
-                            .setMessage(message)
-                            .build());
+                    .failTask(request.build());
         } catch (StatusRuntimeException e) {
             throw translate(e, taskId);
         }

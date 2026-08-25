@@ -23,7 +23,10 @@ class DagValidatorTest {
     private static final int MAX_EDGES = 500;
     private static final int DEFAULT_MAX_ATTEMPTS = 10;
 
-    private final DagValidator validator = new DagValidator(MAX_TASKS, MAX_EDGES, DEFAULT_MAX_ATTEMPTS);
+    // The attempt budget is resolved per task type, so the validator takes a lookup rather than a
+    // number. Every type gets the same budget here; RetryAndDeadLetterTest covers the per-type case.
+    private final DagValidator validator =
+            new DagValidator(MAX_TASKS, MAX_EDGES, taskType -> DEFAULT_MAX_ATTEMPTS);
 
     // ------------------------------------------------------------------
     // Accepted shapes

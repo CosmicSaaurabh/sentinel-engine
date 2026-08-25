@@ -122,12 +122,12 @@ final class FakeEngineClient implements EngineClient {
     }
 
     @Override
-    public void fail(UUID taskId, long fencingToken, String message, boolean permanent) {
+    public void fail(UUID taskId, long fencingToken, String message, boolean permanent, String errorClass) {
         throwReportErrorIfArmed();
         if (revokedLeases.contains(taskId)) {
             throw new LeaseLostException(taskId, "lease lost");
         }
-        failures.add(new Failure(taskId, message, permanent));
+        failures.add(new Failure(taskId, message, permanent, errorClass));
     }
 
     @Override
@@ -145,6 +145,6 @@ final class FakeEngineClient implements EngineClient {
     record Completion(UUID taskId, String output) {
     }
 
-    record Failure(UUID taskId, String message, boolean permanent) {
+    record Failure(UUID taskId, String message, boolean permanent, String errorClass) {
     }
 }

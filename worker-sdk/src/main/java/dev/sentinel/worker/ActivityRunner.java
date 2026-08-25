@@ -160,12 +160,12 @@ final class ActivityRunner implements AutoCloseable {
             return TaskResult.failed("handler was interrupted");
         } catch (Exception e) {
             log.warn("handler for {} threw on task {}", task.taskType(), task.taskId(), e);
-            return TaskResult.failed(e.getClass().getSimpleName() + ": " + e.getMessage());
+            return TaskResult.fromException(e);
         } catch (Error e) {
             // Reported so the task does not silently vanish, then rethrown: the process may be
             // genuinely dying, and swallowing that would be worse than the task failing.
             log.error("handler for {} hit an error on task {}", task.taskType(), task.taskId(), e);
-            reportQuietly(task, TaskResult.failed(e.getClass().getSimpleName() + ": " + e.getMessage()));
+            reportQuietly(task, TaskResult.fromException(e));
             throw e;
         }
     }
@@ -218,8 +218,9 @@ final class ActivityRunner implements AutoCloseable {
         switch (result) {
             case TaskResult.Completed completed ->
                     client.complete(task.taskId(), task.fencingToken(), completed.output());
-            case TaskResult.Failed failed ->
-                    client.fail(task.taskId(), task.fencingToken(), failed.message(), failed.permanent());
+            case TaskResult.Failed failed -> client.fail(
+                    task.taskId(), task.fencingToken(), failed.message(), failed.permanent(),
+                    failed.errorClass());
         }
     }
 
