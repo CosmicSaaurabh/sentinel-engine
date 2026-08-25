@@ -146,8 +146,14 @@ final class ActivityRunner implements AutoCloseable {
                 task.input(),
                 task.attempt(),
                 task.maxAttempts(),
+                task.traceContext(),
                 () -> heartbeats.isLost(task.taskId()));
 
+        // Identifiers stay in the logging context for the whole invocation, including the catch
+        // blocks, so the SDK's own warnings about a failing handler carry them too. Restored in a
+        // finally rather than cleared, because activity threads are pooled and a value left behind
+        // would reappear on the next unrelated task.
+        LogContext logContext = LogContext.forTask(task);
         try {
             TaskResult result = handler.handle(context);
             if (result == null) {
@@ -167,6 +173,8 @@ final class ActivityRunner implements AutoCloseable {
             log.error("handler for {} hit an error on task {}", task.taskType(), task.taskId(), e);
             reportQuietly(task, TaskResult.fromException(e));
             throw e;
+        } finally {
+            logContext.close();
         }
     }
 

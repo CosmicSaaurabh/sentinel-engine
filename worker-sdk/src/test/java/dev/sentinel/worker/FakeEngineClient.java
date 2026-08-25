@@ -59,7 +59,10 @@ final class FakeEngineClient implements EngineClient {
     AssignedTask offer(String taskType, String input, int attempt, int maxAttempts) {
         AssignedTask task = new AssignedTask(
                 UUID.randomUUID(), UUID.randomUUID(), "task-" + available.size(),
-                taskType, input, attempt, maxAttempts, 1L);
+                taskType, input, attempt, maxAttempts, 1L,
+                // A plausible W3C traceparent, so the log-context parsing is exercised rather than
+                // always taking the null path.
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
         available.add(task);
         return task;
     }

@@ -42,9 +42,13 @@ public class TaskRepository {
             owner_worker_id, fencing_token, created_at, updated_at
             """;
 
+    // The workflow's trace context is joined in rather than denormalised onto the task, because it
+    // is written once per workflow and read once per claim; copying it to every task row would
+    // trade a cheap join for a wider row on the highest-churn table in the system.
     private static final String CLAIM_COLUMNS =
             "t.id, t.workflow_id, t.name, t.task_type, t.input, t.attempt, t.max_attempts, "
-                    + "t.fencing_token, t.lease_expires_at";
+                    + "t.fencing_token, t.lease_expires_at, "
+                    + "(SELECT w.trace_context FROM workflows w WHERE w.id = t.workflow_id) AS trace_context";
 
     /**
      * How many rows one multi-row {@code INSERT} carries.

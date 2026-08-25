@@ -61,7 +61,8 @@ interface EngineClient extends AutoCloseable {
             String input,
             int attempt,
             int maxAttempts,
-            long fencingToken) {
+            long fencingToken,
+            String traceContext) {
     }
 
     /**

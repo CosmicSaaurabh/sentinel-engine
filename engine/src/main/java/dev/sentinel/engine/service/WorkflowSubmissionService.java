@@ -49,6 +49,7 @@ public class WorkflowSubmissionService {
     private final TaskDependencyRepository dependencies;
     private final OutboxRepository outbox;
     private final TransactionTemplate transactionTemplate;
+    private final io.micrometer.tracing.Tracer tracer;
     private final Counter submitted;
     private final Counter deduplicated;
 
@@ -60,6 +61,7 @@ public class WorkflowSubmissionService {
             TaskDependencyRepository dependencies,
             OutboxRepository outbox,
             TransactionTemplate transactionTemplate,
+            org.springframework.beans.factory.ObjectProvider<io.micrometer.tracing.Tracer> tracer,
             MeterRegistry meterRegistry) {
         this.validator = validator;
         this.admissionController = admissionController;
@@ -68,6 +70,8 @@ public class WorkflowSubmissionService {
         this.dependencies = dependencies;
         this.outbox = outbox;
         this.transactionTemplate = transactionTemplate;
+        // Optional, because tracing can be switched off and the engine must still submit workflows.
+        this.tracer = tracer.getIfAvailable();
         this.submitted = Counter.builder("sentinel.workflow.submitted")
                 .description("workflows accepted and written")
                 .register(meterRegistry);
@@ -126,7 +130,12 @@ public class WorkflowSubmissionService {
     }
 
     private Workflow write(ValidatedDag dag) {
-        Workflow workflow = workflows.insert(dag.workflow());
+        // Captured here, at the one moment the submitting request's context is available. The
+        // workflow will outlive this request by minutes or hours, and a task claimed later still
+        // needs to be able to join the trace that started it.
+        String traceContext = dev.sentinel.engine.infra.TraceContext.currentTraceParent(tracer)
+                .orElse(null);
+        Workflow workflow = workflows.insert(dag.workflow(), traceContext);
         Map<String, UUID> taskIdsByName = tasks.insertAll(workflow.id(), dag.tasks());
 
         List<TaskEdge> edges = dag.edges().stream()
@@ -147,8 +156,9 @@ public class WorkflowSubmissionService {
         outbox.appendAll(workflow.id(), rootTaskIds, OutboxEventType.TASK_SCHEDULED, "{}");
 
         submitted.increment();
-        log.info("workflow {} submitted with {} task(s), {} runnable immediately",
-                workflow.id(), dag.tasks().size(), rootTaskIds.size());
+        dev.sentinel.engine.infra.TaskLogContext.runForWorkflow(workflow.id(), () ->
+                log.info("workflow {} submitted with {} task(s), {} runnable immediately",
+                        workflow.id(), dag.tasks().size(), rootTaskIds.size()));
         return workflow;
     }
 

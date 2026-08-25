@@ -20,7 +20,8 @@ public record ClaimedTask(
         int attempt,
         int maxAttempts,
         long fencingToken,
-        Instant leaseExpiresAt) {
+        Instant leaseExpiresAt,
+        String traceContext) {
 
     public ClaimedTask {
         Objects.requireNonNull(id, "id");

@@ -113,11 +113,49 @@ sentinel:
     max-batch-size: 32
     record-claim-events: true
 
+logging:
+  # Human-readable on the console, machine-readable in the file. Both, rather than a choice.
+  #
+  # A developer watching a terminal wants to read log lines; a log aggregator wants to index fields.
+  # Forcing JSON to the console makes local work miserable, and leaving the file unstructured makes
+  # "show me every line for workflow X across three instances" a grep across hosts. Writing both
+  # costs one extra appender and removes the trade entirely.
+  structured:
+    format:
+      file: ecs
+  file:
+    name: logs/sentinel-engine.log
+  # workflowId, taskId and traceId come from MDC. Without them, "task failed, retrying in 4s" is
+  # unattributable in an engine running thousands of workflows at once, and correlating by
+  # timestamp stops working exactly when there is enough traffic for it to matter.
+  pattern:
+    correlation: "[%X{traceId:-}-%X{spanId:-}] [wf=%X{workflowId:-} task=%X{taskId:-}] "
+
 management:
   endpoints:
     web:
       exposure:
-        include: health,prometheus
+        include: health,prometheus,metrics
   endpoint:
     health:
       show-details: always
+  metrics:
+    tags:
+      # Every metric carries which instance produced it, so a single sick instance is visible
+      # rather than averaged away across the fleet.
+      application: sentinel-engine
+  tracing:
+    sampling:
+      # Everything is sampled, deliberately, and this is an MVP decision rather than a default.
+      #
+      # At the throughput this engine is designed for, 100% sampling would be expensive and would
+      # need to drop to a few percent. But a partly-sampled trace is close to useless for the thing
+      # tracing is for here, which is following one specific task through submission, claim,
+      # execution and completion across two processes. Head sampling would drop most of those
+      # traces, and the one an operator wants is never the one that was kept.
+      #
+      # The right answer at scale is tail sampling in a collector, keeping every trace that
+      # contains an error or exceeds a latency threshold and discarding the rest. That belongs in
+      # collector configuration rather than here, and is noted as the next step rather than left
+      # as an accident.
+      probability: 1.0

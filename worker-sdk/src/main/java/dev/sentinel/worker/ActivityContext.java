@@ -19,6 +19,11 @@ import java.util.function.BooleanSupplier;
  *        exactly-once effect
  * @param attempt which attempt this is, counting from one. Useful for logging, and for handlers
  *        that want to behave differently on a retry
+ * @param traceContext the W3C traceparent of the workflow that owns this task, or null when the
+ *        submitter was not tracing. An application that brings its own OpenTelemetry can continue
+ *        that trace from here, so its spans join the ones the engine emitted. The SDK does not do
+ *        this for you, because it carries no tracing library at all: it carries no framework, and
+ *        that is the same rule
  */
 public record ActivityContext(
         UUID taskId,
@@ -28,6 +33,7 @@ public record ActivityContext(
         String input,
         int attempt,
         int maxAttempts,
+        String traceContext,
         BooleanSupplier leaseLost) {
 
     public ActivityContext {

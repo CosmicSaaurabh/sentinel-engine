@@ -64,6 +64,27 @@ It submits a diamond-shaped order-fulfilment workflow, starts a worker that exec
 `charge-card` fails on its first attempt deliberately, so a run shows the retry path rather than only the happy one.
 The two middle steps have no dependency on each other and run concurrently; `send-receipt` waits for both.
 
+## Observability
+
+The engine exposes health and Prometheus metrics on `8080` and the worker protocol on `9090`.
+
+```bash
+curl localhost:8080/actuator/health
+curl localhost:8080/actuator/prometheus | grep sentinel_
+```
+
+A Grafana dashboard is committed at [`infra/grafana/sentinel-engine-dashboard.json`](infra/grafana/sentinel-engine-dashboard.json), organised around three questions rather than around metric names: is work flowing, is work succeeding, and is the fleet healthy.
+
+Three panels are worth knowing about before you need them:
+
+- **Claimable versus pending.** A gap between them means tasks are waiting out a retry backoff rather than waiting for a worker. A queue that looks deep while nothing is claimable is a retry storm, and adding workers to it will not help.
+- **Expired leases awaiting recovery.** The reaper's own backlog. Every reaper pass looks healthy while this climbs, so it is the only signal that recovery is losing ground. It should sit near zero.
+- **Heartbeats renewed versus leases lost.** Lost leases are workers discovering their work was taken away. A steady trickle under load usually means the heartbeat interval is too close to the lease duration.
+
+Logs are human-readable on the console and ECS-structured in `logs/sentinel-engine.log`, so a developer watching a terminal and a log aggregator indexing fields both get what they need. Every line carries `workflowId`, `taskId` and the trace id when there is one.
+
+Tracing samples everything for the MVP, which is a deliberate choice rather than a default: a partly sampled trace is close to useless for following one task through submission, claim, execution and completion, and the trace an operator wants is never the one head sampling happened to keep. Tail sampling in a collector is the documented next step.
+
 ## Writing a Worker
 
 See the [Worker SDK guide](worker-sdk/README.md) for the handler contract, the threading model, idempotency, failure classification, and shutdown semantics.
