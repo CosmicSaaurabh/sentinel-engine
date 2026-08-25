@@ -96,6 +96,17 @@
             <artifactId>grpc-inprocess</artifactId>
             <scope>test</scope>
         </dependency>
+        <!--
+            Test scope only, and the direction matters: the engine's tests use the SDK, the engine
+            itself does not. Reversing that, or letting this leak out of test scope, would couple
+            the server to its own client and make the SDK impossible to version independently.
+        -->
+        <dependency>
+            <groupId>dev.sentinel</groupId>
+            <artifactId>worker-sdk</artifactId>
+            <version>${project.version}</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc-test</artifactId>

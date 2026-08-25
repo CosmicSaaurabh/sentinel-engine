@@ -10,6 +10,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.grpc.test.autoconfigure.AutoConfigureTestGrpcTransport;
 import org.springframework.grpc.client.GrpcChannelFactory;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.TestPropertySource;
 
 /**
@@ -24,8 +25,25 @@ import org.springframework.test.context.TestPropertySource;
  * <p>{@code @AutoConfigureTestGrpcTransport} swaps the Netty server and channel factories for
  * in-process ones. Everything layered on top, including the service beans, the exception handler
  * and the virtual-thread executor, is the production wiring.
+ *
+ * <h2>Why the context is dirtied after every class</h2>
+ *
+ * <p>The in-process server address is generated once per JVM and shared by every test context. Two
+ * Spring contexts alive at the same time therefore try to serve the same address, and channels can
+ * reach the wrong engine, which is backed by a different database container. The symptom is
+ * horrible: a test submits a workflow successfully, then waits forever for a worker that is polling
+ * a completely different engine, and it only happens when a particular pair of classes runs in the
+ * same JVM.
+ *
+ * <p>Dirtying the context after each class guarantees at most one server is alive at a time. It
+ * costs a container per gRPC test class, which is a fair price for a suite whose results do not
+ * depend on the order it happens to run in.
+ *
+ * <p>Any test class that needs different engine properties gets its own context, so it inherits
+ * this protection automatically by extending this class rather than having to remember it.
  */
 @AutoConfigureTestGrpcTransport
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 @TestPropertySource(properties = {
         // A short retry interval keeps the long-poll tests quick without changing what they prove.
         "sentinel.grpc.poll-retry-interval=50ms"

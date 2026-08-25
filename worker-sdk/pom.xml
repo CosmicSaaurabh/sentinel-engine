@@ -15,9 +15,68 @@
     <packaging>jar</packaging>
 
     <!--
-        Deliberately no dependencies yet.
-        T2.4 requires this module to stay a plain Java library with zero
-        org.springframework.* dependency. Do not add one here later either -
-        if the SDK needs DI or config binding, solve it without Spring.
+        A plain Java library. No org.springframework.* dependency, ever.
+
+        The reason is not purity. A client should be able to run a Sentinel worker inside a Spring
+        app, a Quarkus app, or a bare main method, and a library that drags a framework in takes
+        that choice away from everyone who uses it. If this SDK ever needs dependency injection or
+        configuration binding, it solves that without Spring; a Spring Boot starter can live in a
+        separate module later that depends on this one, rather than being this one.
+
+        Dependencies are kept to the wire contract, a gRPC transport, and a logging facade.
     -->
+
+    <dependencies>
+        <dependency>
+            <groupId>dev.sentinel</groupId>
+            <artifactId>proto</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-stub</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-api</artifactId>
+        </dependency>
+        <!--
+            A facade, not an implementation. The SDK logs through slf4j and leaves the choice of
+            logging backend to the application embedding it, which is the whole point of a facade.
+        -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <!--
+            Runtime only: the transport an application needs to actually open a channel. Shaded so
+            the SDK cannot collide with an application's own Netty version.
+        -->
+        <dependency>
+            <groupId>io.grpc</groupId>
+            <artifactId>grpc-netty-shaded</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
 </project>

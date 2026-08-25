@@ -7,6 +7,36 @@ Revisit this file periodically to revise.
 ## Entry Template
 
 ```
+### 2026-08-25 - A queue in front of an activity pool converts directly into duplicate execution
+- Context: sizing the worker SDK's executor, where the obvious design is a bounded queue in front of a fixed thread pool.
+- What I learned: the usual reasoning about queues does not apply when the queued item holds a lease. A task reaches the pool only after being claimed, and a claimed task is one the engine believes is being worked on. Sitting in a queue makes no progress towards anything the engine measures, so queue depth converts one-for-one into lease expiry, re-queue, and the same work running twice. A bounded queue does not fix this; it only chooses how much duplicate execution to permit. The correct shape is a `SynchronousQueue` plus a semaphore the poller must acquire before asking for work, so the worker never claims what it cannot start immediately.
+- Gotcha: "bounded queue" is normally the safe, responsible answer to backpressure. Here it is the unsafe one, and the reason has nothing to do with memory.
+- Reference: docs/low-level-design/LLD-002-worker-sdk.md section 3.3
+
+### 2026-08-25 - Heartbeating from a worker thread fails precisely when the worker is busiest
+- Context: deciding which thread renews task leases in the SDK.
+- What I learned: putting the heartbeat on the threads that run handler code creates a failure mode that is triggered by load rather than by faults. Saturate the activity pool with CPU-bound work and those threads cannot be scheduled in time to heartbeat; the leases expire, the engine concludes the worker is dead, and it hands the work to somebody else while the original worker is still doing it. The worker was healthy, and it missed its heartbeats *because* it was working hard. A dedicated thread doing nothing but one small batched call on a timer has no such coupling.
+- Gotcha: the bug is invisible in testing, because it only appears under sustained saturation, and it looks exactly like a crash in the logs.
+- Reference: docs/low-level-design/LLD-002-worker-sdk.md section 3.1
+
+### 2026-08-25 - Reporting a still-running task as failed is worse than letting its lease expire
+- Context: what a worker should do at shutdown with handlers that outlive the drain timeout.
+- What I learned: the helpful-sounding option, reporting them failed so the engine re-queues them immediately, is the dangerous one. Those tasks are still executing, so telling the engine they are available starts a second copy alongside the first rather than after it. At-least-once quietly becomes at-least-twice-simultaneously, which is a much harder thing for an idempotency key to absorb than a delay. Abandoning them and letting the lease lapse costs one lease duration and preserves the invariant that the engine never knowingly runs a task in two places at once. Ordering matters as much: heartbeats must stop *after* the drain, not before, or tasks seconds from finishing lose their leases.
+- Gotcha: also learned this the hard way in code - the first implementation called `shutdownNow()`, whose interrupt made handlers throw, which the wrapper classified as a failure and reported. The test caught it.
+- Reference: docs/low-level-design/LLD-002-worker-sdk.md section 6.1
+
+### 2026-08-25 - Long polling gets streaming's latency without streaming's state
+- Context: choosing between plain polling, bidirectional streaming, and long polling for the worker protocol.
+- What I learned: streaming looked obviously right for low dispatch latency, but it does not remove polling, it relocates it. Postgres has no push channel in this design, so an engine holding streams for two hundred workers still has to ask Postgres whether anything is runnable; what changes is who asks. In exchange it adds per-worker engine state, flow control, and instance affinity. Long polling keeps the engine stateless because the in-flight request *is* the state, moves the retry cadence from a thousand independent workers to one number on the engine, and can absorb a future push channel as an improvement to the inside of the wait with no protocol change.
+- Gotcha: the deciding question was not "which is fastest" but "what state does each leave behind when a worker disappears mid-call".
+- Reference: docs/high-level-design/HLD-002-grpc-transport.md section 3
+
+### 2026-08-25 - An interrupted poll can leave a task claimed but undelivered
+- Context: an end-to-end test failed roughly one run in three, with one task stuck RUNNING and no error logged anywhere.
+- What I learned: closing a worker interrupts its in-flight poll, but the engine may already have committed that claim. The task is then owned by a worker that never received it and is shutting down, so nothing will ever report it. This is not a bug to fix in the client; it is exactly the gap leases exist for, and it is why the reaper is not optional. The same window opens on any lost response, network partition included.
+- Gotcha: the symptom was maximally misleading - a workflow that submitted fine, a worker that logged no errors, and a failure that only appeared when a particular earlier test had run first. Dumping the task table in the assertion message turned a long investigation into one glance, which is now the standing habit for any wait-for-state assertion.
+- Reference: engine/src/test/java/dev/sentinel/engine/api/grpc/WorkerSdkEndToEndTest.java
+
 ### <date> - <concept title>
 - Context: where in the project this came up.
 - What I learned: the core idea in my own words.

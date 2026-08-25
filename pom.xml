@@ -9,10 +9,17 @@
     <version>0.0.1-SNAPSHOT</version>
     <packaging>pom</packaging>
 
+    <!--
+        Order is a hint; Maven resolves the real order from the dependency graph. Listing it this
+        way makes the layering obvious to a reader: the contract has no dependencies, the SDK
+        depends only on the contract, and the engine depends on the contract plus, in test scope
+        only, the SDK.
+    -->
     <modules>
-        <module>engine</module>
-        <module>worker-sdk</module>
         <module>proto</module>
+        <module>worker-sdk</module>
+        <module>engine</module>
+        <module>samples</module>
     </modules>
 
     <properties>
