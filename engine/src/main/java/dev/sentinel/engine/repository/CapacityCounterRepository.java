@@ -21,6 +21,17 @@ import org.springframework.stereotype.Repository;
  * <p>Spreading the writes across N rows removes the hot row, and the read stays constant-time
  * because it sums a small fixed number of rows.
  *
+ * <h2>Changing the shard count</h2>
+ *
+ * <p>Not a live rehashing operation, and it does not need to be. Nothing about a shard's identity
+ * is meaningful: shards hold no per-key state, only a share of one total, and a completion is
+ * already free to decrement a shard its claim never touched. Adding rows makes the new shards
+ * available immediately; removing them would strand whatever those rows held.
+ *
+ * <p>So the migration is: insert new shard rows, then run {@link #reconcileFromTasks()} to
+ * redistribute the total across the new set. Removing shards should reconcile first, so nothing is
+ * stranded in a row about to disappear.
+ *
  * <p>This counter is a heuristic, not an invariant. An engine that dies between claiming a task and
  * updating the counter leaves it slightly wrong, and the consequence is admitting a little too much
  * or too little work, never an incorrect task state. It is repaired by periodic reconciliation

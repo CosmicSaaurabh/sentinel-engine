@@ -52,6 +52,13 @@ public class AdmissionController {
         }
 
         long inFlight = capacity.totalInFlight();
+        // Rejected at exactly zero free slots, with no safety buffer above it.
+        //
+        // A buffer was considered and rejected. The counter is already approximate: it can drift
+        // when an engine dies between claiming a task and updating it, and it is read a moment
+        // before the write it guards. A buffer would be a second, arbitrary fudge stacked on top of
+        // an existing imprecision, and its only effect would be to refuse work the fleet could
+        // actually have run. The honest answer to "is there room" is "are all the slots taken".
         if (inFlight >= properties.totalSlots()) {
             rejected.increment();
             throw new AdmissionRejectedException(inFlight, properties.totalSlots(), jitteredRetryAfter());
