@@ -56,6 +56,13 @@ public class TaskRepository {
      */
     private static final int INSERT_CHUNK_SIZE = 500;
 
+    private static final org.springframework.jdbc.core.RowMapper<ExpiredLease> EXPIRED_LEASE =
+            (rs, rowNum) -> new ExpiredLease(
+                    rs.getObject("id", UUID.class),
+                    rs.getObject("workflow_id", UUID.class),
+                    rs.getInt("attempt"),
+                    rs.getString("owner_worker_id"));
+
     private final JdbcClient jdbcClient;
 
     public TaskRepository(JdbcClient jdbcClient) {
@@ -512,12 +519,20 @@ public class TaskRepository {
      * every claimer. Several engine instances reaping at the same time divide the work rather than
      * colliding, which is what keeps the reaper leaderless.
      *
-     * @return ids that were re-queued
+     * <p><strong>The delay is jittered per task, not per batch.</strong> {@code random()} is
+     * evaluated once per row, so a recovered batch is spread across the window rather than becoming
+     * claimable at one instant. A single delay for the whole batch would remove the lock contention
+     * and then recreate the stampede one step later, which is the more damaging half of the
+     * problem.
+     *
+     * <p>The previous owner and attempt number are read from the CTE rather than from
+     * {@code RETURNING} on the updated row, because the update has already cleared the owner by
+     * then. They are needed to record who was holding the lease when it lapsed.
      */
-    public List<UUID> requeueExpiredLeases(int batchSize, Duration retryDelay) {
+    public List<ExpiredLease> requeueExpiredLeases(int batchSize, Duration retryDelay) {
         return jdbcClient.sql("""
                 WITH expired AS (
-                    SELECT id
+                    SELECT id, workflow_id, attempt, owner_worker_id
                       FROM tasks
                      WHERE status = 'RUNNING'
                        AND lease_expires_at < now()
@@ -530,17 +545,18 @@ public class TaskRepository {
                    SET status = 'PENDING',
                        owner_worker_id = NULL,
                        lease_expires_at = NULL,
-                       next_attempt_at = now() + (interval '1 second' * :delaySeconds),
+                       next_attempt_at = now()
+                           + (interval '1 second' * :delaySeconds * (0.5 + random())),
                        last_error = 'lease expired before the worker reported',
                        last_error_kind = 'RETRYABLE',
                        updated_at = now()
                   FROM expired e
                  WHERE t.id = e.id
-                RETURNING t.id
+                RETURNING e.id, e.workflow_id, e.attempt, e.owner_worker_id
                 """)
                 .param("batchSize", batchSize)
                 .param("delaySeconds", retryDelay.toSeconds())
-                .query((rs, rowNum) -> rs.getObject("id", UUID.class))
+                .query(EXPIRED_LEASE)
                 .list();
     }
 
@@ -551,10 +567,10 @@ public class TaskRepository {
      * decisions, and folding them into one {@code CASE} would hide which one happened from metrics
      * and from anyone reading the SQL.
      */
-    public List<UUID> failExhaustedExpiredLeases(int batchSize) {
+    public List<ExpiredLease> failExhaustedExpiredLeases(int batchSize) {
         return jdbcClient.sql("""
                 WITH expired AS (
-                    SELECT id
+                    SELECT id, workflow_id, attempt, owner_worker_id
                       FROM tasks
                      WHERE status = 'RUNNING'
                        AND lease_expires_at < now()
@@ -572,10 +588,35 @@ public class TaskRepository {
                        updated_at = now()
                   FROM expired e
                  WHERE t.id = e.id
-                RETURNING t.id
+                RETURNING e.id, e.workflow_id, e.attempt, e.owner_worker_id
                 """)
                 .param("batchSize", batchSize)
-                .query((rs, rowNum) -> rs.getObject("id", UUID.class))
+                .query(EXPIRED_LEASE)
                 .list();
+    }
+
+    /**
+     * How many leases have expired and not yet been reaped.
+     *
+     * <p>Exposed as a gauge. If expiries arrive faster than the reaper drains them, recovery
+     * latency climbs and nothing else says so: the reaper keeps working, each pass looks healthy,
+     * and only this number growing reveals that it is losing ground.
+     */
+    public long countExpiredLeases() {
+        return jdbcClient.sql("""
+                SELECT count(*) FROM tasks
+                 WHERE status = 'RUNNING' AND lease_expires_at < now()
+                """)
+                .query(Long.class)
+                .single();
+    }
+
+    /**
+     * A lease that lapsed, as it was just before the reaper touched it.
+     *
+     * @param ownerWorkerId who was holding it, which is the detail that turns "a task was reaped"
+     *        into "this worker stopped reporting", and is gone from the row once it is released
+     */
+    public record ExpiredLease(UUID taskId, UUID workflowId, int attempt, String ownerWorkerId) {
     }
 }
